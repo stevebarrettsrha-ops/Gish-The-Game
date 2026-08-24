@@ -1,0 +1,32 @@
+Controller
+Reconnect
+Quick Connect
+Search
+Disconnect
+Searching for devices. This may take a few moments.
+Searching for devices. This may take a few moments. (%0 found)
+Looking up device names. This may take a few moments. (%0 of %1)
+Canceling device search. This may take a few moments.
+No devices found. Check that your controller is on and search again.
+Connecting to %0. This may take a few moments.
+Connected to %0.
+Unable to connect. Make sure your controller is on and Bluetooth is enabled on your phone.
+Disconnecting from %0.
+Disconnected from %0.
+Unable to disconnect. Please try again in a few moments.
+OK
+Cancel
+Back
+Auto Connect: Off
+Auto Connect: On
+Auto Connect is now enabled. The next time you start the application, it will automatically connect to your controller.
+Auto Connect is now disabled. The next time you start the application, you will need to use the menu to connect to your controller.
+Select
+Retry Connection
+Unable to search for devices. Make sure Bluetooth is enabled on your phone.
+Unable to search for devices. Restart the application and grant permission to use Bluetooth.
+Unable to connect. Restart the application and grant permission to use Bluetooth.
+Unable to search for devices. Make sure Bluetooth is enabled on your phone.
+Unable to connect. Make sure Bluetooth is enabled on your phone.
+Connection to the controller was lost.
+Auto Connect is now enabled. Go to the Controller menu to disable it.
