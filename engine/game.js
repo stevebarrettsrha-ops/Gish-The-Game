@@ -467,25 +467,63 @@ const Game = (() => {
       case 42: if (down) pl.setAbility(pl.ability === 2 ? 0 : 2); break;
       case 35: if (down) pl.setAbility(pl.ability === 1 ? 0 : 1); break;
       case -6: if (down) pl.cycleAbility(); break;
-      case -7: if (down) { G.active = false; Shell.open(1); } break;
+      case -7: if (down) { releaseKeys(); G.active = false; Shell.open(1); } break;
     }
   }
 
-  function tap(x, y, down) {
-    if (G.state === 6) { if (down && G.dialog && G.dialog.frames >= 8) dismissDialog(); return; }
-    if (G.state === 5 || G.state === 4) { if (down && G.resultsT > 7) finishResults(); return; }
+  // release every held direction (pause, blur, focus loss, touch cancel)
+  function releaseKeys() {
+    for (const pl of G.players) {
+      if (!pl || pl.ai) continue;
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+    }
+  }
+
+  // on-screen buttons: ability (bottom-left) and pause (bottom-right)
+  function buttonAt(x, y) {
+    if (y <= View.h - 70) return null;
+    if (x > View.w - 66) return 'pause';
+    if (x < 66) return 'ability';
+    return null;
+  }
+  function pressButton(kind) {
+    if (kind === 'pause') { releaseKeys(); G.active = false; Shell.open(1); return; }
+    if (kind === 'ability') { const pl = G.players[0]; if (pl && !pl.dead) pl.cycleAbility(); }
+  }
+
+  // A touch/click going down. Returns 'consumed' when a dialog, the results
+  // sheet or an on-screen button took it, or 'steer' when it drives Gish —
+  // the caller uses that to decide which finger owns steering.
+  function touchDown(x, y) {
+    if (G.state === 6) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); return 'consumed'; }
+    if (G.state === 5 || G.state === 4) { if (G.resultsT > 7) finishResults(); return 'consumed'; }
+    const b = buttonAt(x, y);
+    if (b) { pressButton(b); return 'consumed'; }
+    if (!G.players[0]) return 'consumed';
+    steer(x, y);
+    return 'steer';
+  }
+
+  // pointer steering: hold a direction relative to Gish; poke his body to attack
+  function steer(x, y) {
     const pl = G.players[0];
     if (!pl) return;
-    if (down && x > View.w - 66 && y > View.h - 70) { G.active = false; Shell.open(1); return; }
-    if (down && x < 66 && y > View.h - 70) { pl.cycleAbility(); return; }
-    // pointer steering: direction from blob to tap
     const c = pl.body.centroid();
     const px = (c.x >> 10) - G.camX, py = (c.y >> 10) - G.camY;
-    if (!down) { pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false; return; }
     const dx = x - px, dy = y - py;
-    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) { pl.keys.attack = true; return; }
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) {
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+      pl.keys.attack = true;
+      return;
+    }
     pl.keys.left = dx < -16; pl.keys.right = dx > 16;
     pl.keys.up = dy < -24; pl.keys.down = dy > 24;
+  }
+
+  // mouse-style single pointer (kept for desktop click-drag)
+  function tap(x, y, down) {
+    if (!down) { releaseKeys(); return; }
+    touchDown(x, y);
   }
 
   function finishResults() {
@@ -899,6 +937,7 @@ const Game = (() => {
   }
 
   return { start, restartLevel, abort, tick, draw, key, tap, addScore, respawnBox, effect,
+           touchDown, steer, releaseKeys, buttonAt, pressButton,
            get active() { return G.active; }, set active(v) { G.active = v; },
            get mode() { return G.mode; }, get submode() { return G.submode; },
            get levelId() { return G.levelId; },

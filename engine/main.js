@@ -111,12 +111,14 @@ const Main = (() => {
   };
 
   function bindInput() {
+    const canvas = View.canvas;
+
+    // ---- keyboard ----
     window.addEventListener('keydown', e => {
       if (e.repeat) { e.preventDefault(); return; }
       Assets.resumeAudio();
       if (state === 'splash') { advanceSplashIfReady(); e.preventDefault(); return; }
-      const code = KEYMAP[e.key];
-      // text input screens get raw chars
+      // text-entry screens take raw characters
       if (!Game.active && Shell.S.widget === 2) {
         if (e.key === 'Backspace') Shell.keyChar('\b');
         else if (e.key === 'Enter') Shell.keyChar('\n');
@@ -124,6 +126,7 @@ const Main = (() => {
         e.preventDefault();
         return;
       }
+      const code = KEYMAP[e.key];
       if (code === undefined) return;
       e.preventDefault();
       if (Game.active) Game.key(code, true);
@@ -132,46 +135,88 @@ const Main = (() => {
         Shell.key(digit >= 0 ? 48 + digit : code, 0);
       }
     });
+    // Always forward key-up, even while paused: otherwise a key released
+    // during the pause menu stays held and Gish runs off on resume.
     window.addEventListener('keyup', e => {
       const code = KEYMAP[e.key];
       if (code === undefined) return;
-      if (Game.active) Game.key(code, false);
+      Game.key(code, false);
     });
-    const pos = ev => {
-      const r = View.canvas.getBoundingClientRect();
-      const t = ev.touches && ev.touches.length ? ev.touches[0] : ev;
+    // losing focus (alt-tab, app switch, screen lock) must drop every key
+    const dropAll = () => { Game.releaseKeys(); steerId = null; };
+    window.addEventListener('blur', dropAll);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) dropAll(); });
+
+    // ---- pointer helpers ----
+    const toVirtual = t => {
+      const r = canvas.getBoundingClientRect();
       return [(t.clientX - r.left) / View.scale, (t.clientY - r.top) / View.scale];
     };
-    let dragging = false;
-    const down = ev => {
-      ev.preventDefault();
-      Assets.resumeAudio();
-      dragging = true;
-      const [x, y] = pos(ev);
+    const wake = () => { Assets.resumeAudio(); };
+
+    // ---- mouse (desktop) ----
+    let mouseDown = false;
+    canvas.addEventListener('mousedown', e => {
+      e.preventDefault(); wake();
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
-      if (Game.active) Game.tap(x, y, true);
-      else Shell.tap(x, y);
-    };
-    const move = ev => {
-      if (!dragging || !Game.active) return;
-      ev.preventDefault();
-      const [x, y] = pos(ev);
-      Game.tap(x, y, true);
-    };
-    const up = ev => {
-      dragging = false;
-      if (Game.active) {
-        const [x, y] = pos(ev.changedTouches && ev.changedTouches.length ? { touches: ev.changedTouches } : ev);
-        Game.tap(x, y, false);
+      mouseDown = true;
+      const [x, y] = toVirtual(e);
+      if (Game.active) Game.touchDown(x, y); else Shell.tap(x, y);
+    });
+    canvas.addEventListener('mousemove', e => {
+      if (!mouseDown || !Game.active) return;
+      e.preventDefault();
+      const [x, y] = toVirtual(e);
+      if (!Game.buttonAt(x, y)) Game.steer(x, y);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      Game.releaseKeys();
+    });
+
+    // ---- touch (phones/tablets) ----
+    // One finger owns steering; other fingers can work the on-screen buttons
+    // at the same time, so you can hold a direction and tap to switch surface.
+    let steerId = null;
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault(); wake();
+      if (state === 'splash') { advanceSplashIfReady(); return; }
+      if (state === 'loading') return;
+      for (const t of e.changedTouches) {
+        const [x, y] = toVirtual(t);
+        if (!Game.active) { Shell.tap(x, y); continue; }
+        if (Game.buttonAt(x, y)) { Game.pressButton(Game.buttonAt(x, y)); continue; }
+        if (steerId === null && Game.touchDown(x, y) === 'steer') steerId = t.identifier;
+        else if (steerId === null) Game.touchDown(x, y);
       }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (!Game.active || steerId === null) return;
+      for (const t of e.changedTouches) {
+        if (t.identifier !== steerId) continue;
+        const [x, y] = toVirtual(t);
+        if (!Game.buttonAt(x, y)) Game.steer(x, y);
+      }
+    }, { passive: false });
+
+    const endTouch = e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier !== steerId) continue;
+        steerId = null;
+        Game.releaseKeys();
+      }
+      // a stray state where no touches remain: make sure nothing is held
+      if (e.touches && e.touches.length === 0) { steerId = null; Game.releaseKeys(); }
     };
-    View.canvas.addEventListener('mousedown', down);
-    View.canvas.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    View.canvas.addEventListener('touchstart', down, { passive: false });
-    View.canvas.addEventListener('touchmove', move, { passive: false });
-    View.canvas.addEventListener('touchend', up);
+    canvas.addEventListener('touchend', endTouch);
+    canvas.addEventListener('touchcancel', endTouch);
+
+    // long-press must not raise the context menu over the canvas
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
   }
 
   function advanceSplashIfReady() { if (booted || splashStage < SPLASH.length - 1) advanceSplash(); }
