@@ -217,7 +217,7 @@ const Game = (() => {
     if (!raw) { sideEffects(id); return; }
     if (HINT_MASK[id] && !Shell.S.settings.hints) { sideEffects(id); return; }
     const fid = 3;
-    const lines = Font.wrap(fid, Font.encode(fid, raw), View.w - 70);
+    const lines = Font.wrap(fid, Font.encode(fid, raw), View.w - 78);
     const portrait = SPEAKER[id] || 0;
     G.dialog = { id, lines, portrait, frames: 0, slide: 0 };
     G.state = 6;
@@ -411,6 +411,15 @@ const Game = (() => {
   }
 
   function specialLevels() {
+    // intro cutscene script (spec 15.3): scene-driven dialogs
+    if (G.levelId === 0) {
+      const c = G.players[0].body.centroid();
+      const col = c.x >> 15;
+      if (G.scene === 0 && col >= 7) { G.scene = 1; openDialog(9); }
+      else if (G.scene === 1 && col >= 13) { G.scene = 2; openDialog(10); }  // chains 10..14
+      else if (G.scene === 2 && col >= 18) { G.scene = 3; openDialog(15); }
+      return;
+    }
     // boss walker dies on lava (bg tile 30 nearby)
     for (const m of G.monsters) {
       if (m.kind === 4 && m.alive()) {
