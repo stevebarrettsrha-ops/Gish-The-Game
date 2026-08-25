@@ -48,7 +48,7 @@ def main():
         template = f.read()
     js_parts = []
     for name in ('assets.js', 'font.js', 'level.js', 'physics.js',
-                 'entities.js', 'game.js', 'shell.js', 'main.js'):
+                 'entities.js', 'bosses.js', 'game.js', 'shell.js', 'main.js'):
         p = os.path.join(ROOT, 'engine', name)
         if os.path.exists(p):
             with open(p) as f:
