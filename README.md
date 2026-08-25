@@ -37,17 +37,46 @@ python3 tools/build.py
 
 ## Controls
 
+### Desktop
+
 | Action | Keys |
 |---|---|
-| Move | Arrow keys / WASD |
-| Jump | Space / W / Up |
-| Heavy | Down / S |
-| Sticky | Left Shift / K |
-| Slick | Left Ctrl / L |
+| Move / roll | Arrow keys or WASD |
+| Jump | Up / W / Space |
+| Heavy (slam down) | Down / S |
+| Sticky surface | K or Left Shift |
+| Slick surface | L or Left Ctrl |
+| Attack (poke) | Enter |
+| Pause | Escape |
 | Menu select / back | Enter / Escape |
 
-Touch controls appear automatically on touch devices, matching the original's
-corner-tap layout.
+You can also steer with the mouse: press and hold anywhere relative to Gish to
+roll that way, and click on his body to make him angry.
+
+### Touch
+
+Exactly as the phone original played — **hold** a finger in the direction you
+want to go, relative to Gish's body:
+
+| Action | Touch |
+|---|---|
+| Move / roll | Hold left or right of Gish |
+| Jump | Hold above him |
+| Heavy | Hold below him |
+| Attack | Poke his body |
+| Change surface | Bottom-left button (normal → sticky → slick) |
+| Pause | Bottom-right button |
+| Menus | Tap an item to highlight it, tap again to choose; soft buttons bottom-left (OK) and bottom-right (back) |
+
+Steering is multi-touch aware: one finger holds a direction while another works
+the surface or pause button, so you can switch surface mid-roll. Movement stops
+the moment the steering finger lifts, and is released if the app loses focus.
+
+Verify all of this on your own machine with:
+
+```
+node tools/verify-controls.js
+```
 
 ## Provenance
 

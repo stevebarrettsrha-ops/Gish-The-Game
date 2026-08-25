@@ -54,6 +54,7 @@ const Game = (() => {
     G.state = 0; G.frame = 0; G.timeMs = 0;
     G.score = [0, 0]; G.amber = [0, 0];
     G.dialog = null; G.scene = 0; G.bossDead = false;
+    G.darkR = 46080; G.heraMourned = false;
     G.triggersFired.clear(); G.secretsFound.clear();
     G.effects = []; G.popups = []; G.parts = [];
     G.dark = levelId === 20;
@@ -83,7 +84,7 @@ const Game = (() => {
       } else if (e.type === 5) {
         const variant = levelId === 14 ? 1 : levelId === 34 ? 3 : 2;
         const ai = new Player(G.world, fx, fy, variant, 2);
-        ai.ai = rivalAI;
+        ai.ai = Bosses.aiFor(levelId, submode);
         G.players.push(ai);
       } else {
         const m = new Monster(G.world, fx, fy, e.type - 2);
@@ -92,6 +93,18 @@ const Game = (() => {
       }
     }
     if (!G.players.length) G.players.push(new Player(G.world, 3 << 15, 3 << 15, 0, 0));
+    // tower bosses reserve 10 tentacle/pillar slots they spawn from at runtime
+    G.pillars = null; G.pillarCool = 30;
+    const tower = G.monsters.find(m => m.kind === 5);
+    if (tower) {
+      G.pillars = [];
+      for (let i = 0; i < 10; i++) {
+        const p = new Monster(G.world, tower.p.x, tower.p.y, 6);
+        p.state = 2; p.p.flags |= 0x10; p.extend = 0; p.len = 3;
+        G.monsters.push(p);
+        G.pillars.push(p);
+      }
+    }
     for (const b of lvl.blocks) G.boxes.push(new Box(G.world, b.x, b.y, b.kind));
     for (const p of lvl.platforms) G.platforms.push(new Platform(G.world, p));
     buildRopes(G.world, lvl, G.boxes);
@@ -112,15 +125,6 @@ const Game = (() => {
   }
 
   // ---- AI ----
-  function rivalAI(pl, game) {
-    // rival blob races right / to exit; simple: move right, jump at walls
-    pl.keys.right = true;
-    const c = pl.body.centroid();
-    const cx = c.x >> 15, cy = c.y >> 15;
-    const w = game.world;
-    const wall = cx + 1 < w.w && w.classOf(cx + 1, cy) === 0;
-    pl.keys.up = wall || FX.rnd(0, 30) === 0;
-  }
   function versusAI(pl, game) {
     const me = pl.body.centroid();
     const other = game.players[0].body.centroid();
@@ -135,8 +139,11 @@ const Game = (() => {
     if (cx < 0 || cy < 0 || cx >= G.world.w || cy >= G.world.h) return;
     const id = G.lvl.tiles[1][cx][cy];
     const pl = body.owner instanceof Player ? body.owner : null;
-    if (pl && !pl.ai) {
+    if (pl) {
+      // spikes hurt every blob, rivals included (that is how Hera is beaten)
       if (Level.SPIKES.has(id)) pl.damage(1024);
+    }
+    if (pl && !pl.ai) {
       // climb assist hints
       if (pl.ability === 2 && KG[id] !== false) {
         const s = G.world.coll[cx][cy];
@@ -243,6 +250,7 @@ const Game = (() => {
   // entities receive G as their game handle
   G.effect = effect; G.addScore = addScore;
   G.respawnBox = box => respawnBox(box);
+  G.requestDialog = id => openDialog(id);   // boss scripts open story dialogs
 
   // ---- per-frame tick (70 ms) ----
   function tick() {
@@ -361,10 +369,11 @@ const Game = (() => {
     if (p0.dead && p0.deadTicks > 100 && G.submode !== 2) restartLevel();
     else if (G.submode >= 2 && G.players.every(pl => pl.dead)) restartLevel();
 
-    // completion: exit tile
+    // completion: boss levels use the scene counter, everything else the exit tile
     let done = false;
     const humans = G.players.filter(pl => !pl.ai);
-    if (bossLevelBlocked()) done = false;
+    const override = Bosses.exitOverride(G);
+    if (override !== null) done = override && humans.some(pl => !pl.dead);
     else if (G.submode === 2 || G.submode === 3) done = humans.length > 0 && humans.every(pl => pl.exitTouch && !pl.dead);
     else done = humans.some(pl => pl.exitTouch && !pl.dead);
     // versus: AI reaching exit
@@ -401,15 +410,6 @@ const Game = (() => {
     G.world.bodies.push(b);
   }
 
-  function bossLevelBlocked() {
-    switch (G.levelId) {
-      case 20: case 23: return !G.bossDead && G.monsters.some(m => m.kind === 4 && m.alive());
-      case 28: case 32: return G.monsters.some(m => m.kind === 5 && m.alive());
-      case 34: { const r = G.players.find(pl => pl.ai); return r && !r.dead; }
-      default: return false;
-    }
-  }
-
   function specialLevels() {
     // intro cutscene script (spec 15.3): scene-driven dialogs
     if (G.levelId === 0) {
@@ -420,33 +420,7 @@ const Game = (() => {
       else if (G.scene === 2 && col >= 18) { G.scene = 3; openDialog(15); }
       return;
     }
-    // boss walker dies on lava (bg tile 30 nearby)
-    for (const m of G.monsters) {
-      if (m.kind === 4 && m.alive()) {
-        const cx = m.p.x >> 15, cy = m.p.y >> 15;
-        for (let x = cx - 1; x <= cx + 1 && m.alive(); x++)
-          for (let y = cy - 1; y <= cy + 1; y++)
-            if (x >= 0 && y >= 0 && x < G.world.w && y < G.world.h && G.lvl.tiles[0][x][y] === 30) {
-              m.die(true, G); G.bossDead = true; break;
-            }
-      }
-      if (m.kind === 5 && m.alive()) {
-        // tower boss: hurt by fast player touch (+30 each), dies at score threshold
-        const pl = G.players[0];
-        if (!pl.dead) {
-          const c = pl.body.centroid();
-          const dx = c.x - m.p.x, dy = c.y - m.p.y;
-          if (dx * dx + dy * dy < (m.K.r + 24576) * (m.K.r + 24576)) {
-            const v = pl.body.avgVel();
-            if (v.x * v.x + v.y * v.y > 0x1E00000 && m.hitCool === undefined || m.hitCool <= 0) {
-              if (v.x * v.x + v.y * v.y > 0x1E00000) { m.hp -= 30; G.score[0] += 30; m.hitCool = 10; Assets.play('gishhit'); }
-            }
-          }
-        }
-        if (m.hitCool > 0) m.hitCool--;
-        if (m.hp <= 0) { m.die(true, G); G.bossDead = true; }
-      }
-    }
+    Bosses.tick(G);
   }
 
   // ---- camera ----
@@ -493,25 +467,63 @@ const Game = (() => {
       case 42: if (down) pl.setAbility(pl.ability === 2 ? 0 : 2); break;
       case 35: if (down) pl.setAbility(pl.ability === 1 ? 0 : 1); break;
       case -6: if (down) pl.cycleAbility(); break;
-      case -7: if (down) { G.active = false; Shell.open(1); } break;
+      case -7: if (down) { releaseKeys(); G.active = false; Shell.open(1); } break;
     }
   }
 
-  function tap(x, y, down) {
-    if (G.state === 6) { if (down && G.dialog && G.dialog.frames >= 8) dismissDialog(); return; }
-    if (G.state === 5 || G.state === 4) { if (down && G.resultsT > 7) finishResults(); return; }
+  // release every held direction (pause, blur, focus loss, touch cancel)
+  function releaseKeys() {
+    for (const pl of G.players) {
+      if (!pl || pl.ai) continue;
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+    }
+  }
+
+  // on-screen buttons: ability (bottom-left) and pause (bottom-right)
+  function buttonAt(x, y) {
+    if (y <= View.h - 70) return null;
+    if (x > View.w - 66) return 'pause';
+    if (x < 66) return 'ability';
+    return null;
+  }
+  function pressButton(kind) {
+    if (kind === 'pause') { releaseKeys(); G.active = false; Shell.open(1); return; }
+    if (kind === 'ability') { const pl = G.players[0]; if (pl && !pl.dead) pl.cycleAbility(); }
+  }
+
+  // A touch/click going down. Returns 'consumed' when a dialog, the results
+  // sheet or an on-screen button took it, or 'steer' when it drives Gish —
+  // the caller uses that to decide which finger owns steering.
+  function touchDown(x, y) {
+    if (G.state === 6) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); return 'consumed'; }
+    if (G.state === 5 || G.state === 4) { if (G.resultsT > 7) finishResults(); return 'consumed'; }
+    const b = buttonAt(x, y);
+    if (b) { pressButton(b); return 'consumed'; }
+    if (!G.players[0]) return 'consumed';
+    steer(x, y);
+    return 'steer';
+  }
+
+  // pointer steering: hold a direction relative to Gish; poke his body to attack
+  function steer(x, y) {
     const pl = G.players[0];
     if (!pl) return;
-    if (down && x > View.w - 66 && y > View.h - 70) { G.active = false; Shell.open(1); return; }
-    if (down && x < 66 && y > View.h - 70) { pl.cycleAbility(); return; }
-    // pointer steering: direction from blob to tap
     const c = pl.body.centroid();
     const px = (c.x >> 10) - G.camX, py = (c.y >> 10) - G.camY;
-    if (!down) { pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false; return; }
     const dx = x - px, dy = y - py;
-    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) { pl.keys.attack = true; return; }
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) {
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+      pl.keys.attack = true;
+      return;
+    }
     pl.keys.left = dx < -16; pl.keys.right = dx > 16;
     pl.keys.up = dy < -24; pl.keys.down = dy > 24;
+  }
+
+  // mouse-style single pointer (kept for desktop click-drag)
+  function tap(x, y, down) {
+    if (!down) { releaseKeys(); return; }
+    touchDown(x, y);
   }
 
   function finishResults() {
@@ -787,7 +799,9 @@ const Game = (() => {
     if (!im) return;
     const px = (m.p.x >> 10) - k, py = (m.p.y >> 10) - l;
     if (m.kind === 6) {
-      for (let i = 0; i <= m.extend; i++) ctx.drawImage(im, px - (im.width >> 1), py - (im.height >> 1) + i * 32);
+      const segs = Math.max(1, (m.extend >> 15) + 1);
+      for (let i = 0; i < segs; i++)
+        ctx.drawImage(im, px - (im.width >> 1), py - (im.height >> 1) + i * 32);
       return;
     }
     ctx.save();
@@ -804,12 +818,22 @@ const Game = (() => {
     const pl = G.players[0];
     const c = pl.body.centroid();
     const px = (c.x >> 10) - k, py = (c.y >> 10) - l;
-    const r = 45;
+    const r = G.darkR >> 10;              // grows near lava glow (level 20)
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, View.w, py - r);
     ctx.fillRect(0, py + r, View.w, View.h - py - r);
     ctx.fillRect(0, py - r, px - r, 2 * r);
     ctx.fillRect(px + r, py - r, View.w - px - r, 2 * r);
+    if (G.darkR !== 46080) {
+      // while the window is expanding the original draws plain 18 px corners
+      ctx.beginPath();
+      ctx.moveTo(px - r, py - r); ctx.lineTo(px - r + 18, py - r); ctx.lineTo(px - r, py - r + 18);
+      ctx.moveTo(px + r, py - r); ctx.lineTo(px + r - 18, py - r); ctx.lineTo(px + r, py - r + 18);
+      ctx.moveTo(px + r, py + r); ctx.lineTo(px + r - 18, py + r); ctx.lineTo(px + r, py + r - 18);
+      ctx.moveTo(px - r, py + r); ctx.lineTo(px - r + 18, py + r); ctx.lineTo(px - r, py + r - 18);
+      ctx.fill();
+      return;
+    }
     const im = Assets.images[471];
     if (im) {
       ctx.drawImage(im, px - r, py - r);
@@ -913,6 +937,7 @@ const Game = (() => {
   }
 
   return { start, restartLevel, abort, tick, draw, key, tap, addScore, respawnBox, effect,
+           touchDown, steer, releaseKeys, buttonAt, pressButton,
            get active() { return G.active; }, set active(v) { G.active = v; },
            get mode() { return G.mode; }, get submode() { return G.submode; },
            get levelId() { return G.levelId; },

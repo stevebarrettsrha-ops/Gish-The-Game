@@ -1431,6 +1431,8 @@ class Player {
           const l = FX.fastLen(dx, dy) || 1;
           dx = (dx * 1024 / l) | 0; dy = (dy * 1024 / l) | 0;
           const isPlayer = tb.type === 1;
+          // striking another blob rips it off whatever it is clinging to
+          if (isPlayer) tb.clearGrabs();
           const power = isPlayer ? 2800 : tb.type === 3 ? 11400 : 5700;
           for (const p of tb.pts) p.applyForce((dx * power) >> 10, (dy * power) >> 10);
           const rec = isPlayer ? 1024 : tb.type === 3 ? 256 : 512;
@@ -1592,9 +1594,13 @@ class Monster {
         break;
       }
       case 5: case 6: {  // tower boss / pillar: static, AABB damage
+        if (this.kind === 6) {                  // tentacle extends 3 px/tick to length
+          const target = 32 * (this.len || 3) * 1024;
+          if (this.extend < target) this.extend = Math.min(target, this.extend + 3072);
+        }
         for (const pl of players) {
           const bb = pl.body.bbox();
-          const rr = this.kind === 6 ? this.extend * 32768 + K.r : K.r;
+          const rr = this.kind === 6 ? this.extend + K.r : K.r;
           if (this.p.x + K.r > bb.x0 && this.p.x - K.r < bb.x1 &&
               this.p.y + rr > bb.y0 && this.p.y - K.r < bb.y1)
             pl.damage(K.dmg);
@@ -1819,6 +1825,322 @@ function buildRopes(world, lvl, boxes) {
   }
 }
 
+// ==== engine/bosses.js ====
+// Boss & rival scripts — ported from the decompiled state machines.
+// Sources: d.java (player/AI tick: level-14 waypoint route, chase AI, level-28
+// score trigger, level-32 boost, level-34 rival death), ae.java (tower-boss
+// kind 5: level-28/32 kill conditions and death tile writes), ab.java
+// (level-20 darkness growth). See reference/spec_engine.md §15.2.
+//
+// Scene counter (`ab.c` in the original) is G.scene; boss levels 20/23/28/32
+// complete at scene 6 and level 34 at scene 2 — the same override the original
+// applies in place of the exit tile.
+
+const Bosses = (() => {
+  const T = 32768;                    // one tile in fixed units
+  const tile = v => v >> 15;
+
+  // ---- level 14: Hera's scripted race route (d.java case 1) ----
+  // Each scene sets ability + held directions and advances on a tile threshold;
+  // scenes 4/5/8 fall back to an earlier scene if she drops off the route.
+  function waypointAI(pl, G) {
+    const k = pl.keys;
+    k.left = k.right = k.up = k.down = false;
+    const c = pl.body.centroid();
+    const x = tile(c.x), y = tile(c.y);
+
+    // she loses the race for you if she reaches the exit first
+    const t1 = G.lvl.tiles[1];
+    if (x >= 0 && y >= 0 && x < G.world.w && y < G.world.h && t1[x][y] === 13) {
+      G.requestDialog(67);
+      return;
+    }
+    const setAb = a => { if (pl.ability !== a) pl.setAbility(a); };
+
+    switch (G.scene) {
+      case 0:
+        if (x < 7) k.right = true;
+        else if (x > 7) k.left = true;
+        break;
+      case 1:
+        setAb(0); k.right = true;
+        if (x >= 10) G.scene++;
+        break;
+      case 2:
+        setAb(2); k.right = true;
+        if (x >= 13) G.scene++;
+        break;
+      case 3:
+        setAb(0); k.right = true;
+        if (x > 28) G.scene++;
+        break;
+      case 4:
+        setAb(2); k.right = true; k.up = true;
+        if (y <= 5) G.scene++;
+        else if (x < 29 && y >= 10) G.scene = 2;
+        break;
+      case 5:
+        setAb(2); k.left = true; k.up = true;
+        if (x < 27) G.scene++;
+        else if (x < 29 && y >= 10) G.scene = 2;
+        break;
+      case 6:
+        setAb(0); k.down = true; k.left = true;
+        if (x <= 22) G.scene++;
+        break;
+      case 7:
+        setAb(2); k.up = true; k.left = true;
+        if (y <= 1) G.scene++;
+        break;
+      case 8:
+        setAb(0); k.right = true;
+        if (y >= 18) G.scene++;
+        else if (x <= 30 && y >= 5) G.scene = 7;
+        break;
+      case 9:
+        setAb(2); k.right = true;
+        break;
+    }
+  }
+
+  // ---- pursuit AI (d.java case 2): sticky chaser used by Hera on level 25 ----
+  function chaseAI(pl, G) {
+    const k = pl.keys;
+    k.left = k.right = k.up = k.down = false;
+    if (G.scene === 0) G.scene = 1;
+    if (G.scene !== 1) return;
+    const human = G.players.find(p => !p.ai && !p.dead);
+    if (!human) return;
+    if (pl.ability !== 2) pl.setAbility(2);
+    const tp = human.body.centroid(), mp = pl.body.centroid();
+    const dx = tp.x - mp.x, dy = tp.y - mp.y;
+    if (tp.y < mp.y && tile(mp.y) > 1 && tile(tp.y) < 15) {
+      const tx = tile(tp.x), mx = tile(mp.x);
+      if (tx < 7) { if (mx > 1) k.left = true; k.up = true; return; }
+      if (tx <= 7) return;
+      if (mx < 13) k.right = true;
+      k.up = true;
+      return;
+    }
+    if (dx > 0) k.right = true; else if (dx < 0) k.left = true;
+    if (dy > 0) k.down = true; else if (dy < 0) k.up = true;
+  }
+
+  // ---- level 34 duel (d.java case 3): Hera chases while the walls close ----
+  function duelAI(pl, G) {
+    const k = pl.keys;
+    k.left = k.right = k.up = k.down = false;
+    const walls = G.platforms;
+    if (G.scene === 0) {                       // walls held off until dialog 128
+      if (walls[0]) walls[0].active = false;
+      if (walls[1]) walls[1].active = false;
+      return;
+    }
+    if (G.scene < 1) G.scene = 1;
+    if (walls[0] && !walls[0].active) {        // crusher walls start, mode 0 (loop)
+      for (const w of [walls[0], walls[1]]) {
+        if (!w) continue;
+        w.active = true; w.oneShot = false; w.mode = 0; w.t = 0;
+      }
+    }
+    const human = G.players.find(p => !p.ai && !p.dead);
+    if (!human) return;
+    if (pl.ability !== 2) pl.setAbility(2);
+    const tp = human.body.centroid(), mp = pl.body.centroid();
+    const dx = tp.x - mp.x, dy = tp.y - mp.y;
+    if (dx > 0) k.right = true; else if (dx < 0) k.left = true;
+    if (!pl.attackTargets.length && tile(mp.y) > 5) { k.up = true; return; }
+    if (dy > 0) k.down = true; else if (dy < 0) k.up = true;
+  }
+
+  function aiFor(levelId, submode) {
+    if (levelId === 14) return waypointAI;
+    if (levelId === 34) return duelAI;
+    if (levelId === 25) return chaseAI;
+    return chaseAI;
+  }
+
+  // ---- per-frame level scripts ----
+  function tick(G) {
+    switch (G.levelId) {
+      case 14: level14(G); break;
+      case 20: level20(G); break;
+      case 28: level28(G); break;
+      case 32: level32(G); break;
+      case 34: level34(G); break;
+    }
+  }
+
+  // level 14: the race starts once the player passes x = 206438 (fixed) -> dialog 61
+  function level14(G) {
+    if (G.scene !== 0) return;
+    const human = G.players.find(p => !p.ai);
+    if (human && !human.dead && human.body.centroid().x > 206438) {
+      G.scene = 1;
+      G.requestDialog(61);
+    }
+  }
+
+  // does a 3x3 block of background tiles around (cx,cy) contain lava glow (id 30)?
+  function nearLava(G, cx, cy) {
+    for (let x = cx - 1; x <= cx + 1; x++)
+      for (let y = cy - 1; y <= cy + 1; y++)
+        if (x >= 0 && y >= 0 && x < G.world.w && y < G.world.h && G.lvl.tiles[0][x][y] === 30)
+          return true;
+    return false;
+  }
+
+  // level 20: darkness window grows near lava glow (bg tile 30); boss burns there
+  function level20(G) {
+    const human = G.players.find(p => !p.ai);
+    if (human && !human.dead) {
+      const c = human.body.centroid();
+      if (nearLava(G, tile(c.x), tile(c.y))) {
+        G.darkR += 4608;                        // +4.5 px per frame
+        if (G.scene === 1) { G.scene = 3; G.requestDialog(78); }
+      }
+    }
+    // the boss chase ends when he blunders into the lava — independent of Gish
+    for (const m of G.monsters) {
+      if (m.kind !== 4 || !m.alive()) continue;
+      if (!nearLava(G, tile(m.p.x), tile(m.p.y))) continue;
+      if (G.scene < 3) continue;
+      if (G.scene < 5) G.scene = 5;
+      m.die(true, G);
+      onBossDeath(G, m);
+    }
+  }
+
+  // Tower bosses (kind 5) own a pool of tentacle/pillar slots (kind 6) that the
+  // original reserves at load and spawns at runtime; ae.java a(int).
+  function spawnPillar(G, boss, slot) {
+    const pool = G.pillars || [];
+    const p = pool[slot];
+    if (!p || p.alive()) return;
+    const bossCol = tile(boss.p.x), bossRow = tile(boss.p.y);
+    const off = G.levelId === 32
+      ? ((slot & 1) === 0 ? FX.rnd(-6, -2) : FX.rnd(2, 6))
+      : FX.rnd(-7, 6);
+    let col = bossCol + off;
+    col = Math.max(1, Math.min(G.world.w - 2, col));
+    p.state = 0; p.frame = 0;
+    p.p.flags &= ~0x10;
+    p.p.x = (col << 15) + 16384;
+    p.p.y = (bossRow << 15) + 16384;
+    p.p.px = p.p.x; p.p.py = p.p.y;
+    p.extend = 0;
+    p.len = FX.rnd(2, 4);
+    p.slot = slot;
+    Assets.play('visattack');
+  }
+
+  // level 28: cut the tentacles down (+30 each, 180 total) then the god is killable
+  function level28(G) {
+    const boss = G.monsters.find(m => m.kind === 5);
+    if (!boss || !boss.alive()) return;
+    if (G.scene < 2) {
+      // he keeps feeding tentacles up while the fight is on
+      if (G.pillars && --G.pillarCool <= 0) {
+        G.pillarCool = 50;
+        const free = G.pillars.findIndex(p => !p.alive());
+        if (free >= 0) spawnPillar(G, boss, free);
+      }
+    }
+    if (G.scene === 1 && G.score[0] >= 180) {
+      G.requestDialog(110);
+      G.scene++;
+      for (const m of G.monsters) if (m.kind === 6 && m.alive()) m.die(false, G);
+    }
+    if (G.scene !== 2) return;
+    if (!inView(G, boss)) return;
+    boss.die(true, G);
+    onBossDeath(G, boss);
+  }
+
+  // level 32: the maw. Kill the two tentacles, then get above his mouth line and
+  // he swallows you (dialog 118) — which is what actually finishes him.
+  function level32(G) {
+    const boss = G.monsters.find(m => m.kind === 5);
+    if (!boss) return;
+    if (G.scene === 0) {                        // he throws up the whole nest at once
+      if (G.pillars) for (let i = 0; i < G.pillars.length - 1; i++) spawnPillar(G, boss, i);
+      G.scene = 1;
+    }
+    // ae.a() is "dead": the gate is the first two tentacles being killed
+    const guards = (G.pillars || []).slice(0, 2);
+    const guardsDown = guards.length >= 2 && guards.every(p => !p.alive());
+    const human = G.players.find(p => !p.ai);
+    if (!human || human.dead) return;
+    const c = human.body.centroid();
+    if (boss.alive() && guardsDown && c.y < boss.p.y + boss.K.r) {
+      G.requestDialog(118);
+      boss.die(true, G);
+      onBossDeath(G, boss);
+      return;
+    }
+    // a surviving tentacle in your column throws you clear of the mouth
+    if (guardsDown) {
+      for (const p of (G.pillars || [])) {
+        if (!p.alive()) continue;
+        if (tile(c.x) === tile(p.p.x) && tile(c.y) >= tile(p.p.y)) {
+          for (const q of human.body.pts) q.applyForce(0, -5000);
+          break;
+        }
+      }
+    }
+  }
+
+  // level 34: Hera's death (after 100 ticks) triggers the closing dialogs
+  function level34(G) {
+    const rival = G.players.find(p => p.ai);
+    const human = G.players.find(p => !p.ai);
+    if (!rival || !human) return;
+    if (rival.dead && rival.deadTicks >= 100 && !human.dead && !human.exitTouch && !G.heraMourned) {
+      G.heraMourned = true;
+      G.requestDialog(129);                     // chains 129 -> 130 -> scene++
+    }
+  }
+
+  function inView(G, m) {
+    const x = (m.p.x >> 10), y = (m.p.y >> 10);
+    return x > G.camX - 64 && x < G.camX + View.w + 64 &&
+           y > G.camY - 64 && y < G.camY + View.h + 64;
+  }
+
+  // tower-boss death rewrites the map (ae.java b()): level 28 clears the three
+  // tiles beneath it, level 32 writes a tile-69 column two rows down.
+  function onBossDeath(G, m) {
+    if (m.kind === 5) {
+      const cx = tile(m.p.x), cy = tile(m.p.y);
+      if (G.levelId === 28) {
+        for (const x of [cx - 1, cx, cx + 1]) {
+          if (x < 0 || x >= G.world.w || cy + 1 >= G.world.h) continue;
+          G.lvl.tiles[1][x][cy + 1] = -1;
+          G.world.retile(x, cy + 1);
+        }
+      } else if (G.levelId === 32) {
+        if (cx >= 0 && cx < G.world.w && cy + 2 < G.world.h) {
+          G.lvl.tiles[1][cx][cy + 2] = 69;
+          G.world.retile(cx, cy + 2);
+        }
+      }
+    }
+    G.bossDead = true;
+    // the original walks the death dialog chain up to scene 6; reaching it here
+    // keeps the exit gate identical without depending on optional hint tiles.
+    if ([20, 23, 28, 32].includes(G.levelId) && G.scene < 6) G.scene = 6;
+  }
+
+  // exit override (d.a(): boss levels ignore the exit tile and use the scene)
+  function exitOverride(G) {
+    if ([20, 23, 28, 32].includes(G.levelId)) return G.scene >= 6;
+    if (G.levelId === 34) return G.scene >= 2;
+    return null;                                // not a boss level: use tile 13
+  }
+
+  return { aiFor, waypointAI, chaseAI, duelAI, tick, exitOverride, onBossDeath };
+})();
+
 // ==== engine/game.js ====
 // In-game session — port of classes k (session) + ab (tick/render/HUD).
 // Runs the original data: 3-layer tile maps, sprite bases {276,566,407},
@@ -1876,6 +2198,7 @@ const Game = (() => {
     G.state = 0; G.frame = 0; G.timeMs = 0;
     G.score = [0, 0]; G.amber = [0, 0];
     G.dialog = null; G.scene = 0; G.bossDead = false;
+    G.darkR = 46080; G.heraMourned = false;
     G.triggersFired.clear(); G.secretsFound.clear();
     G.effects = []; G.popups = []; G.parts = [];
     G.dark = levelId === 20;
@@ -1905,7 +2228,7 @@ const Game = (() => {
       } else if (e.type === 5) {
         const variant = levelId === 14 ? 1 : levelId === 34 ? 3 : 2;
         const ai = new Player(G.world, fx, fy, variant, 2);
-        ai.ai = rivalAI;
+        ai.ai = Bosses.aiFor(levelId, submode);
         G.players.push(ai);
       } else {
         const m = new Monster(G.world, fx, fy, e.type - 2);
@@ -1914,6 +2237,18 @@ const Game = (() => {
       }
     }
     if (!G.players.length) G.players.push(new Player(G.world, 3 << 15, 3 << 15, 0, 0));
+    // tower bosses reserve 10 tentacle/pillar slots they spawn from at runtime
+    G.pillars = null; G.pillarCool = 30;
+    const tower = G.monsters.find(m => m.kind === 5);
+    if (tower) {
+      G.pillars = [];
+      for (let i = 0; i < 10; i++) {
+        const p = new Monster(G.world, tower.p.x, tower.p.y, 6);
+        p.state = 2; p.p.flags |= 0x10; p.extend = 0; p.len = 3;
+        G.monsters.push(p);
+        G.pillars.push(p);
+      }
+    }
     for (const b of lvl.blocks) G.boxes.push(new Box(G.world, b.x, b.y, b.kind));
     for (const p of lvl.platforms) G.platforms.push(new Platform(G.world, p));
     buildRopes(G.world, lvl, G.boxes);
@@ -1934,15 +2269,6 @@ const Game = (() => {
   }
 
   // ---- AI ----
-  function rivalAI(pl, game) {
-    // rival blob races right / to exit; simple: move right, jump at walls
-    pl.keys.right = true;
-    const c = pl.body.centroid();
-    const cx = c.x >> 15, cy = c.y >> 15;
-    const w = game.world;
-    const wall = cx + 1 < w.w && w.classOf(cx + 1, cy) === 0;
-    pl.keys.up = wall || FX.rnd(0, 30) === 0;
-  }
   function versusAI(pl, game) {
     const me = pl.body.centroid();
     const other = game.players[0].body.centroid();
@@ -1957,8 +2283,11 @@ const Game = (() => {
     if (cx < 0 || cy < 0 || cx >= G.world.w || cy >= G.world.h) return;
     const id = G.lvl.tiles[1][cx][cy];
     const pl = body.owner instanceof Player ? body.owner : null;
-    if (pl && !pl.ai) {
+    if (pl) {
+      // spikes hurt every blob, rivals included (that is how Hera is beaten)
       if (Level.SPIKES.has(id)) pl.damage(1024);
+    }
+    if (pl && !pl.ai) {
       // climb assist hints
       if (pl.ability === 2 && KG[id] !== false) {
         const s = G.world.coll[cx][cy];
@@ -2065,6 +2394,7 @@ const Game = (() => {
   // entities receive G as their game handle
   G.effect = effect; G.addScore = addScore;
   G.respawnBox = box => respawnBox(box);
+  G.requestDialog = id => openDialog(id);   // boss scripts open story dialogs
 
   // ---- per-frame tick (70 ms) ----
   function tick() {
@@ -2183,10 +2513,11 @@ const Game = (() => {
     if (p0.dead && p0.deadTicks > 100 && G.submode !== 2) restartLevel();
     else if (G.submode >= 2 && G.players.every(pl => pl.dead)) restartLevel();
 
-    // completion: exit tile
+    // completion: boss levels use the scene counter, everything else the exit tile
     let done = false;
     const humans = G.players.filter(pl => !pl.ai);
-    if (bossLevelBlocked()) done = false;
+    const override = Bosses.exitOverride(G);
+    if (override !== null) done = override && humans.some(pl => !pl.dead);
     else if (G.submode === 2 || G.submode === 3) done = humans.length > 0 && humans.every(pl => pl.exitTouch && !pl.dead);
     else done = humans.some(pl => pl.exitTouch && !pl.dead);
     // versus: AI reaching exit
@@ -2223,15 +2554,6 @@ const Game = (() => {
     G.world.bodies.push(b);
   }
 
-  function bossLevelBlocked() {
-    switch (G.levelId) {
-      case 20: case 23: return !G.bossDead && G.monsters.some(m => m.kind === 4 && m.alive());
-      case 28: case 32: return G.monsters.some(m => m.kind === 5 && m.alive());
-      case 34: { const r = G.players.find(pl => pl.ai); return r && !r.dead; }
-      default: return false;
-    }
-  }
-
   function specialLevels() {
     // intro cutscene script (spec 15.3): scene-driven dialogs
     if (G.levelId === 0) {
@@ -2242,33 +2564,7 @@ const Game = (() => {
       else if (G.scene === 2 && col >= 18) { G.scene = 3; openDialog(15); }
       return;
     }
-    // boss walker dies on lava (bg tile 30 nearby)
-    for (const m of G.monsters) {
-      if (m.kind === 4 && m.alive()) {
-        const cx = m.p.x >> 15, cy = m.p.y >> 15;
-        for (let x = cx - 1; x <= cx + 1 && m.alive(); x++)
-          for (let y = cy - 1; y <= cy + 1; y++)
-            if (x >= 0 && y >= 0 && x < G.world.w && y < G.world.h && G.lvl.tiles[0][x][y] === 30) {
-              m.die(true, G); G.bossDead = true; break;
-            }
-      }
-      if (m.kind === 5 && m.alive()) {
-        // tower boss: hurt by fast player touch (+30 each), dies at score threshold
-        const pl = G.players[0];
-        if (!pl.dead) {
-          const c = pl.body.centroid();
-          const dx = c.x - m.p.x, dy = c.y - m.p.y;
-          if (dx * dx + dy * dy < (m.K.r + 24576) * (m.K.r + 24576)) {
-            const v = pl.body.avgVel();
-            if (v.x * v.x + v.y * v.y > 0x1E00000 && m.hitCool === undefined || m.hitCool <= 0) {
-              if (v.x * v.x + v.y * v.y > 0x1E00000) { m.hp -= 30; G.score[0] += 30; m.hitCool = 10; Assets.play('gishhit'); }
-            }
-          }
-        }
-        if (m.hitCool > 0) m.hitCool--;
-        if (m.hp <= 0) { m.die(true, G); G.bossDead = true; }
-      }
-    }
+    Bosses.tick(G);
   }
 
   // ---- camera ----
@@ -2315,25 +2611,63 @@ const Game = (() => {
       case 42: if (down) pl.setAbility(pl.ability === 2 ? 0 : 2); break;
       case 35: if (down) pl.setAbility(pl.ability === 1 ? 0 : 1); break;
       case -6: if (down) pl.cycleAbility(); break;
-      case -7: if (down) { G.active = false; Shell.open(1); } break;
+      case -7: if (down) { releaseKeys(); G.active = false; Shell.open(1); } break;
     }
   }
 
-  function tap(x, y, down) {
-    if (G.state === 6) { if (down && G.dialog && G.dialog.frames >= 8) dismissDialog(); return; }
-    if (G.state === 5 || G.state === 4) { if (down && G.resultsT > 7) finishResults(); return; }
+  // release every held direction (pause, blur, focus loss, touch cancel)
+  function releaseKeys() {
+    for (const pl of G.players) {
+      if (!pl || pl.ai) continue;
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+    }
+  }
+
+  // on-screen buttons: ability (bottom-left) and pause (bottom-right)
+  function buttonAt(x, y) {
+    if (y <= View.h - 70) return null;
+    if (x > View.w - 66) return 'pause';
+    if (x < 66) return 'ability';
+    return null;
+  }
+  function pressButton(kind) {
+    if (kind === 'pause') { releaseKeys(); G.active = false; Shell.open(1); return; }
+    if (kind === 'ability') { const pl = G.players[0]; if (pl && !pl.dead) pl.cycleAbility(); }
+  }
+
+  // A touch/click going down. Returns 'consumed' when a dialog, the results
+  // sheet or an on-screen button took it, or 'steer' when it drives Gish —
+  // the caller uses that to decide which finger owns steering.
+  function touchDown(x, y) {
+    if (G.state === 6) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); return 'consumed'; }
+    if (G.state === 5 || G.state === 4) { if (G.resultsT > 7) finishResults(); return 'consumed'; }
+    const b = buttonAt(x, y);
+    if (b) { pressButton(b); return 'consumed'; }
+    if (!G.players[0]) return 'consumed';
+    steer(x, y);
+    return 'steer';
+  }
+
+  // pointer steering: hold a direction relative to Gish; poke his body to attack
+  function steer(x, y) {
     const pl = G.players[0];
     if (!pl) return;
-    if (down && x > View.w - 66 && y > View.h - 70) { G.active = false; Shell.open(1); return; }
-    if (down && x < 66 && y > View.h - 70) { pl.cycleAbility(); return; }
-    // pointer steering: direction from blob to tap
     const c = pl.body.centroid();
     const px = (c.x >> 10) - G.camX, py = (c.y >> 10) - G.camY;
-    if (!down) { pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false; return; }
     const dx = x - px, dy = y - py;
-    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) { pl.keys.attack = true; return; }
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) {
+      pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
+      pl.keys.attack = true;
+      return;
+    }
     pl.keys.left = dx < -16; pl.keys.right = dx > 16;
     pl.keys.up = dy < -24; pl.keys.down = dy > 24;
+  }
+
+  // mouse-style single pointer (kept for desktop click-drag)
+  function tap(x, y, down) {
+    if (!down) { releaseKeys(); return; }
+    touchDown(x, y);
   }
 
   function finishResults() {
@@ -2609,7 +2943,9 @@ const Game = (() => {
     if (!im) return;
     const px = (m.p.x >> 10) - k, py = (m.p.y >> 10) - l;
     if (m.kind === 6) {
-      for (let i = 0; i <= m.extend; i++) ctx.drawImage(im, px - (im.width >> 1), py - (im.height >> 1) + i * 32);
+      const segs = Math.max(1, (m.extend >> 15) + 1);
+      for (let i = 0; i < segs; i++)
+        ctx.drawImage(im, px - (im.width >> 1), py - (im.height >> 1) + i * 32);
       return;
     }
     ctx.save();
@@ -2626,12 +2962,22 @@ const Game = (() => {
     const pl = G.players[0];
     const c = pl.body.centroid();
     const px = (c.x >> 10) - k, py = (c.y >> 10) - l;
-    const r = 45;
+    const r = G.darkR >> 10;              // grows near lava glow (level 20)
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, View.w, py - r);
     ctx.fillRect(0, py + r, View.w, View.h - py - r);
     ctx.fillRect(0, py - r, px - r, 2 * r);
     ctx.fillRect(px + r, py - r, View.w - px - r, 2 * r);
+    if (G.darkR !== 46080) {
+      // while the window is expanding the original draws plain 18 px corners
+      ctx.beginPath();
+      ctx.moveTo(px - r, py - r); ctx.lineTo(px - r + 18, py - r); ctx.lineTo(px - r, py - r + 18);
+      ctx.moveTo(px + r, py - r); ctx.lineTo(px + r - 18, py - r); ctx.lineTo(px + r, py - r + 18);
+      ctx.moveTo(px + r, py + r); ctx.lineTo(px + r - 18, py + r); ctx.lineTo(px + r, py + r - 18);
+      ctx.moveTo(px - r, py + r); ctx.lineTo(px - r + 18, py + r); ctx.lineTo(px - r, py + r - 18);
+      ctx.fill();
+      return;
+    }
     const im = Assets.images[471];
     if (im) {
       ctx.drawImage(im, px - r, py - r);
@@ -2735,6 +3081,7 @@ const Game = (() => {
   }
 
   return { start, restartLevel, abort, tick, draw, key, tap, addScore, respawnBox, effect,
+           touchDown, steer, releaseKeys, buttonAt, pressButton,
            get active() { return G.active; }, set active(v) { G.active = v; },
            get mode() { return G.mode; }, get submode() { return G.submode; },
            get levelId() { return G.levelId; },
@@ -3455,12 +3802,14 @@ const Main = (() => {
   };
 
   function bindInput() {
+    const canvas = View.canvas;
+
+    // ---- keyboard ----
     window.addEventListener('keydown', e => {
       if (e.repeat) { e.preventDefault(); return; }
       Assets.resumeAudio();
       if (state === 'splash') { advanceSplashIfReady(); e.preventDefault(); return; }
-      const code = KEYMAP[e.key];
-      // text input screens get raw chars
+      // text-entry screens take raw characters
       if (!Game.active && Shell.S.widget === 2) {
         if (e.key === 'Backspace') Shell.keyChar('\b');
         else if (e.key === 'Enter') Shell.keyChar('\n');
@@ -3468,6 +3817,7 @@ const Main = (() => {
         e.preventDefault();
         return;
       }
+      const code = KEYMAP[e.key];
       if (code === undefined) return;
       e.preventDefault();
       if (Game.active) Game.key(code, true);
@@ -3476,46 +3826,88 @@ const Main = (() => {
         Shell.key(digit >= 0 ? 48 + digit : code, 0);
       }
     });
+    // Always forward key-up, even while paused: otherwise a key released
+    // during the pause menu stays held and Gish runs off on resume.
     window.addEventListener('keyup', e => {
       const code = KEYMAP[e.key];
       if (code === undefined) return;
-      if (Game.active) Game.key(code, false);
+      Game.key(code, false);
     });
-    const pos = ev => {
-      const r = View.canvas.getBoundingClientRect();
-      const t = ev.touches && ev.touches.length ? ev.touches[0] : ev;
+    // losing focus (alt-tab, app switch, screen lock) must drop every key
+    const dropAll = () => { Game.releaseKeys(); steerId = null; };
+    window.addEventListener('blur', dropAll);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) dropAll(); });
+
+    // ---- pointer helpers ----
+    const toVirtual = t => {
+      const r = canvas.getBoundingClientRect();
       return [(t.clientX - r.left) / View.scale, (t.clientY - r.top) / View.scale];
     };
-    let dragging = false;
-    const down = ev => {
-      ev.preventDefault();
-      Assets.resumeAudio();
-      dragging = true;
-      const [x, y] = pos(ev);
+    const wake = () => { Assets.resumeAudio(); };
+
+    // ---- mouse (desktop) ----
+    let mouseDown = false;
+    canvas.addEventListener('mousedown', e => {
+      e.preventDefault(); wake();
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
-      if (Game.active) Game.tap(x, y, true);
-      else Shell.tap(x, y);
-    };
-    const move = ev => {
-      if (!dragging || !Game.active) return;
-      ev.preventDefault();
-      const [x, y] = pos(ev);
-      Game.tap(x, y, true);
-    };
-    const up = ev => {
-      dragging = false;
-      if (Game.active) {
-        const [x, y] = pos(ev.changedTouches && ev.changedTouches.length ? { touches: ev.changedTouches } : ev);
-        Game.tap(x, y, false);
+      mouseDown = true;
+      const [x, y] = toVirtual(e);
+      if (Game.active) Game.touchDown(x, y); else Shell.tap(x, y);
+    });
+    canvas.addEventListener('mousemove', e => {
+      if (!mouseDown || !Game.active) return;
+      e.preventDefault();
+      const [x, y] = toVirtual(e);
+      if (!Game.buttonAt(x, y)) Game.steer(x, y);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      Game.releaseKeys();
+    });
+
+    // ---- touch (phones/tablets) ----
+    // One finger owns steering; other fingers can work the on-screen buttons
+    // at the same time, so you can hold a direction and tap to switch surface.
+    let steerId = null;
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault(); wake();
+      if (state === 'splash') { advanceSplashIfReady(); return; }
+      if (state === 'loading') return;
+      for (const t of e.changedTouches) {
+        const [x, y] = toVirtual(t);
+        if (!Game.active) { Shell.tap(x, y); continue; }
+        if (Game.buttonAt(x, y)) { Game.pressButton(Game.buttonAt(x, y)); continue; }
+        if (steerId === null && Game.touchDown(x, y) === 'steer') steerId = t.identifier;
+        else if (steerId === null) Game.touchDown(x, y);
       }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (!Game.active || steerId === null) return;
+      for (const t of e.changedTouches) {
+        if (t.identifier !== steerId) continue;
+        const [x, y] = toVirtual(t);
+        if (!Game.buttonAt(x, y)) Game.steer(x, y);
+      }
+    }, { passive: false });
+
+    const endTouch = e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier !== steerId) continue;
+        steerId = null;
+        Game.releaseKeys();
+      }
+      // a stray state where no touches remain: make sure nothing is held
+      if (e.touches && e.touches.length === 0) { steerId = null; Game.releaseKeys(); }
     };
-    View.canvas.addEventListener('mousedown', down);
-    View.canvas.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    View.canvas.addEventListener('touchstart', down, { passive: false });
-    View.canvas.addEventListener('touchmove', move, { passive: false });
-    View.canvas.addEventListener('touchend', up);
+    canvas.addEventListener('touchend', endTouch);
+    canvas.addEventListener('touchcancel', endTouch);
+
+    // long-press must not raise the context menu over the canvas
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
   }
 
   function advanceSplashIfReady() { if (booted || splashStage < SPLASH.length - 1) advanceSplash(); }

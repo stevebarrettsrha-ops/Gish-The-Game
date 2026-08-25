@@ -54,7 +54,7 @@ function mkctx(imageStub) {
   vm.createContext(ctx);
   // assets.js is browser-only (GAME_DATA base64, WebAudio); the stub Assets above
   // stands in for it here, and its unpack logic is verified in section 2.
-  for (const f of ['font.js', 'level.js', 'physics.js', 'entities.js', 'game.js', 'shell.js']) {
+  for (const f of ['font.js', 'level.js', 'physics.js', 'entities.js', 'bosses.js', 'game.js', 'shell.js']) {
     vm.runInContext(E(f), ctx, { filename: f });
   }
   return ctx;
@@ -298,6 +298,185 @@ console.log('[7] progression: completion -> save -> next level');
     'campaign end: save cleared, highscore/name flow opens', JSON.stringify(res.afterEnd));
   ok(res.afterReplay.screen === 4 && !res.afterReplay.active, 'single-map replay returns to choose-map',
     JSON.stringify(res.afterReplay));
+}
+
+// ---------- 8. boss encounters ----------
+console.log('[8] boss scripts (14 / 20 / 28 / 32 / 34)');
+{
+  // level 14: the rival must actually run the scripted route, not idle
+  {
+    const ctx = mkctx(true);
+    const r = vm.runInContext(`
+      (() => {
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(14, 1, 0);
+        const G = Game.G;
+        const rival = G.players.find(p => p.ai);
+        const start = rival ? rival.body.centroid().x >> 15 : -1;
+        G.scene = 1;                       // race started
+        const seen = new Set();
+        for (let f = 0; f < 400; f++) {
+          if (G.state === 6 && G.dialog) { G.dialog.frames = 10; Game.key(-5, true); }
+          if (G.state === 5) break;
+          Game.tick();
+          seen.add(G.scene);
+        }
+        return { has: !!rival, start, end: rival.body.centroid().x >> 15,
+                 scenes: [...seen].sort((a,b)=>a-b), ai: !!(rival && rival.ai) };
+      })()`, ctx);
+    ok(r.has && r.ai, 'level 14: rival blob spawned with waypoint AI');
+    ok(r.end > r.start, 'level 14: rival advances along the route', r.start + ' -> ' + r.end);
+    ok(r.scenes.length > 1, 'level 14: waypoint scenes advance', JSON.stringify(r.scenes));
+  }
+  // level 20: darkness grows near lava; boss burns and opens the exit
+  {
+    const ctx = mkctx(true);
+    const r = vm.runInContext(`
+      (() => {
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(20, 1, 0);
+        const G = Game.G;
+        const r0 = G.darkR;
+        const boss = G.monsters.find(m => m.kind === 4);
+        // put the player on a lava-glow tile to trigger the growth + scene 3
+        let lx = -1, ly = -1;
+        for (let x = 0; x < G.world.w && lx < 0; x++)
+          for (let y = 0; y < G.world.h; y++)
+            if (G.lvl.tiles[0][x][y] === 30) { lx = x; ly = y; break; }
+        const pl = G.players[0];
+        // pretend Gish is standing in the glow: drive the script input directly
+        G.scene = 1;
+        const lavaProbe = () => { G.darkR += 0; };
+        const run = n => { for (let f = 0; f < n; f++) {
+          if (G.state === 6 && G.dialog) { G.dialog.frames = 10; Game.key(-5, true); }
+          if (G.state === 0) Game.tick();
+        } };
+        if (lx >= 0) {   // move Gish onto the glow tile without burying him
+          const c = pl.body.centroid();
+          const dx = (lx << 15) + 16384 - c.x, dy = (ly << 15) + 16384 - c.y;
+          for (const p of pl.body.pts) { p.x += dx; p.y += dy; p.px += dx; p.py += dy; }
+        }
+        run(4);
+        const grew = G.darkR > r0;
+        // now kill the boss on lava and confirm the exit gate opens
+        if (boss) {   // move him onto the glow (reset verlet prev, or he slingshots)
+          boss.p.x = (lx << 15) + 16384; boss.p.y = (ly << 15) + 16384;
+          boss.p.px = boss.p.x; boss.p.py = boss.p.y;
+        }
+        if (G.scene < 3) G.scene = 3;
+        run(6);
+        return { r0, grew, scene: G.scene, lava: lx >= 0,
+                 bossDead: boss ? !boss.alive() : null, exit: Bosses.exitOverride(G) };
+      })()`, ctx);
+    ok(r.lava, 'level 20: lava-glow tiles present in the map');
+    ok(r.r0 === 46080, 'level 20: darkness window starts at 45 px', r.r0);
+    ok(r.grew, 'level 20: window expands near lava glow');
+    ok(r.bossDead === true, 'level 20: boss burns on the lava');
+    ok(r.exit === true, 'level 20: exit gate opens at scene 6 after the kill', 'scene ' + r.scene);
+  }
+  // level 28: score 180 severs tentacles, then the god is killable + tiles clear
+  {
+    const ctx = mkctx(true);
+    const r = vm.runInContext(`
+      (() => {
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(28, 1, 0);
+        const G = Game.G;
+        const boss = G.monsters.find(m => m.kind === 5);
+        const pillars = G.monsters.filter(m => m.kind === 6).length;
+        G.scene = 1;
+        G.score[0] = 180;                    // tentacles severed
+        // park the camera on the boss so it counts as in view
+        if (boss) { G.camX = (boss.p.x >> 10) - 100; G.camY = (boss.p.y >> 10) - 100; }
+        const before = boss ? [G.lvl.tiles[1][boss.p.x >> 15][(boss.p.y >> 15) + 1]] : [];
+        for (let f = 0; f < 8; f++) {
+          if (G.state === 6 && G.dialog) { G.dialog.frames = 10; Game.key(-5, true); }
+          Game.tick();
+          if (boss) { G.camX = (boss.p.x >> 10) - 100; G.camY = (boss.p.y >> 10) - 100; }
+        }
+        const after = boss ? [G.lvl.tiles[1][boss.p.x >> 15][(boss.p.y >> 15) + 1]] : [];
+        return { boss: !!boss, pillars, dead: boss ? !boss.alive() : null,
+                 scene: G.scene, before, after, exit: Bosses.exitOverride(G) };
+      })()`, ctx);
+    ok(r.boss, 'level 28: tower boss present');
+    ok(r.dead === true, 'level 28: boss dies once the tentacles are severed (score 180)');
+    ok(r.after[0] === -1, 'level 28: death clears the tiles beneath the boss',
+      JSON.stringify(r.before) + ' -> ' + JSON.stringify(r.after));
+    ok(r.exit === true, 'level 28: exit gate opens', 'scene ' + r.scene);
+  }
+  // level 32: lever puzzle kills the maw, writes tile 69, then boosts the player
+  {
+    const ctx = mkctx(true);
+    const r = vm.runInContext(`
+      (() => {
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(32, 1, 0);
+        const G = Game.G;
+        const boss = G.monsters.find(m => m.kind === 5);
+        const pl = G.players[0];
+        const hold = () => {   // keep Gish hovering just above the mouth
+          const c = pl.body.centroid();
+          const dx = boss.p.x - c.x, dy = boss.p.y - 8192 - c.y;
+          for (const p of pl.body.pts) { p.x += dx; p.y += dy; p.px = p.x; p.py = p.y; }
+        };
+        const run = n => { for (let f = 0; f < n; f++) {
+          if (G.state === 6 && G.dialog) { G.dialog.frames = 10; Game.key(-5, true); }
+          hold();
+          if (G.state === 0) Game.tick();
+        } };
+        run(2);                                      // boss throws up the nest
+        const guards = G.pillars.length;
+        // only one tentacle down: the boss must survive
+        if (G.pillars[0]) G.pillars[0].state = 2;
+        run(4);
+        const survivedOneLever = boss ? boss.alive() : null;
+        // second tentacle down
+        if (G.pillars[1]) G.pillars[1].state = 2;
+        run(6);
+        const cx = boss ? boss.p.x >> 15 : 0, cy = boss ? boss.p.y >> 15 : 0;
+        return { boss: !!boss, levers: guards, survivedOneLever,
+                 dead: boss ? !boss.alive() : null,
+                 written: cy + 2 < G.world.h ? G.lvl.tiles[1][cx][cy + 2] : null,
+                 exit: Bosses.exitOverride(G) };
+      })()`, ctx);
+    ok(r.boss && r.levers >= 2, 'level 32: maw boss + tentacle nest spawned', 'tentacles ' + r.levers);
+    ok(r.survivedOneLever === true, 'level 32: one tentacle down does NOT open the maw');
+    ok(r.dead === true, 'level 32: both tentacles down + Gish above the mouth kills it');
+    ok(r.written === 69, 'level 32: death writes the tile-69 column', 'tile ' + r.written);
+    ok(r.exit === true, 'level 32: exit gate opens');
+  }
+  // level 34: crusher walls arm at scene 1, Hera is killable, ending fires
+  {
+    const ctx = mkctx(true);
+    const r = vm.runInContext(`
+      (() => {
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(34, 1, 0);
+        const G = Game.G;
+        const rival = G.players.find(p => p.ai);
+        for (let f = 0; f < 3; f++) Game.tick();
+        const wallsOffAtScene0 = G.platforms.length >= 2 &&
+          !G.platforms[0].active && !G.platforms[1].active;
+        G.scene = 1;                                   // dialog 128 dismissed
+        for (let f = 0; f < 3; f++) Game.tick();
+        const wallsOn = G.platforms.length >= 2 && G.platforms[0].active;
+        // rival takes spike damage like a real blob
+        const hp0 = rival ? rival.health : 0;
+        if (rival) rival.damage(102400);
+        let dlg = null;
+        for (let f = 0; f < 130; f++) {
+          Game.tick();
+          if (G.state === 6 && G.dialog) { dlg = G.dialog.id; break; }
+        }
+        return { rival: !!rival, wallsOffAtScene0, wallsOn, hp0, dead: rival && rival.dead,
+                 dlg, aiKind: rival && rival.ai === Bosses.duelAI };
+      })()`, ctx);
+    ok(r.rival && r.aiKind, 'level 34: Hera spawned with the duel AI');
+    ok(r.wallsOffAtScene0, 'level 34: crusher walls held off at scene 0');
+    ok(r.wallsOn, 'level 34: walls close in once the fight starts');
+    ok(r.dead, 'level 34: Hera can be killed');
+    ok(r.dlg === 129, 'level 34: her death triggers the ending dialog 129', 'got ' + r.dlg);
+  }
 }
 
 console.log('\\n=== ' + pass + ' passed, ' + fail + ' failed ===');

@@ -186,6 +186,8 @@ class Player {
           const l = FX.fastLen(dx, dy) || 1;
           dx = (dx * 1024 / l) | 0; dy = (dy * 1024 / l) | 0;
           const isPlayer = tb.type === 1;
+          // striking another blob rips it off whatever it is clinging to
+          if (isPlayer) tb.clearGrabs();
           const power = isPlayer ? 2800 : tb.type === 3 ? 11400 : 5700;
           for (const p of tb.pts) p.applyForce((dx * power) >> 10, (dy * power) >> 10);
           const rec = isPlayer ? 1024 : tb.type === 3 ? 256 : 512;
@@ -347,9 +349,13 @@ class Monster {
         break;
       }
       case 5: case 6: {  // tower boss / pillar: static, AABB damage
+        if (this.kind === 6) {                  // tentacle extends 3 px/tick to length
+          const target = 32 * (this.len || 3) * 1024;
+          if (this.extend < target) this.extend = Math.min(target, this.extend + 3072);
+        }
         for (const pl of players) {
           const bb = pl.body.bbox();
-          const rr = this.kind === 6 ? this.extend * 32768 + K.r : K.r;
+          const rr = this.kind === 6 ? this.extend + K.r : K.r;
           if (this.p.x + K.r > bb.x0 && this.p.x - K.r < bb.x1 &&
               this.p.y + rr > bb.y0 && this.p.y - K.r < bb.y1)
             pl.damage(K.dmg);
