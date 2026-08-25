@@ -1381,9 +1381,22 @@ class Player {
       for (const p of b.pts) if (!(p.flags & 5)) p.applyForce(fx, fy);
     }
 
-    // rolling torque
+    // sticky peel: while moving, release grabs stretched past 4 px so Gish can crawl/climb
+    const dirPeel = (k.right ? 1 : 0) - (k.left ? 1 : 0) || (k.up ? 1 : 0) || (k.down ? 1 : 0);
+    if (attached && dirPeel) {
+      for (let i = b.grabs.length - 1; i >= 0; i--) {
+        const g = b.grabs[i];
+        const q = g.otherPos();
+        if (FX.fastLen(g.p1.x - q.x, g.p1.y - q.y) > 4096) {
+          g.p1.flags &= ~0xC;
+          b.grabs.splice(i, 1);
+        }
+      }
+    }
+
+    // rolling torque (kept while sticky so Gish rolls up walls)
     const dir = (k.right ? 1 : 0) - (k.left ? 1 : 0);
-    if (dir && !attached) {
+    if (dir) {
       const mag = dir * (this.inWater ? 200 : 300);
       const c = b.centroid();
       for (const p of b.pts) {
@@ -2026,7 +2039,7 @@ const Game = (() => {
     if (!raw) { sideEffects(id); return; }
     if (HINT_MASK[id] && !Shell.S.settings.hints) { sideEffects(id); return; }
     const fid = 3;
-    const lines = Font.wrap(fid, Font.encode(fid, raw), View.w - 70);
+    const lines = Font.wrap(fid, Font.encode(fid, raw), View.w - 78);
     const portrait = SPEAKER[id] || 0;
     G.dialog = { id, lines, portrait, frames: 0, slide: 0 };
     G.state = 6;
@@ -2220,6 +2233,15 @@ const Game = (() => {
   }
 
   function specialLevels() {
+    // intro cutscene script (spec 15.3): scene-driven dialogs
+    if (G.levelId === 0) {
+      const c = G.players[0].body.centroid();
+      const col = c.x >> 15;
+      if (G.scene === 0 && col >= 7) { G.scene = 1; openDialog(9); }
+      else if (G.scene === 1 && col >= 13) { G.scene = 2; openDialog(10); }  // chains 10..14
+      else if (G.scene === 2 && col >= 18) { G.scene = 3; openDialog(15); }
+      return;
+    }
     // boss walker dies on lava (bg tile 30 nearby)
     for (const m of G.monsters) {
       if (m.kind === 4 && m.alive()) {

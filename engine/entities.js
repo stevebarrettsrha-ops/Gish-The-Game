@@ -136,9 +136,22 @@ class Player {
       for (const p of b.pts) if (!(p.flags & 5)) p.applyForce(fx, fy);
     }
 
-    // rolling torque
+    // sticky peel: while moving, release grabs stretched past 4 px so Gish can crawl/climb
+    const dirPeel = (k.right ? 1 : 0) - (k.left ? 1 : 0) || (k.up ? 1 : 0) || (k.down ? 1 : 0);
+    if (attached && dirPeel) {
+      for (let i = b.grabs.length - 1; i >= 0; i--) {
+        const g = b.grabs[i];
+        const q = g.otherPos();
+        if (FX.fastLen(g.p1.x - q.x, g.p1.y - q.y) > 4096) {
+          g.p1.flags &= ~0xC;
+          b.grabs.splice(i, 1);
+        }
+      }
+    }
+
+    // rolling torque (kept while sticky so Gish rolls up walls)
     const dir = (k.right ? 1 : 0) - (k.left ? 1 : 0);
-    if (dir && !attached) {
+    if (dir) {
       const mag = dir * (this.inWater ? 200 : 300);
       const c = b.centroid();
       for (const p of b.pts) {
