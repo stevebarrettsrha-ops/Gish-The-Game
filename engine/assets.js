@@ -82,7 +82,8 @@ const Assets = (() => {
     // loose PNG overrides (loaded from original files, same paths as the midlet)
     const loose = {
       471: 'img_gish/dark_corner_alpha.png',
-      // tile-layer alpha variants are looked up by path at draw time; see Tiles
+      fg6: 'img_tiles/fg/6_alpha.png',
+      fg7: 'img_tiles/fg/7_alpha.png',
     };
     for (const [gid, path] of Object.entries(loose)) {
       jobs.push(pngToImage(bytesOf(path)).then(im => { images[gid] = im; }));
