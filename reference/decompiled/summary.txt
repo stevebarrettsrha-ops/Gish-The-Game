@@ -1,0 +1,60 @@
+Summary for /root/.claude/uploads/f5f7c7a1-6d4e-51ae-ae67-d7188a7eadf6/be2c65a3-Gish_Reloaded_360.jar
+Decompiled with CFR 0.152
+
+
+at
+----------------------------
+
+f()
+  Loose catch block
+
+
+ay
+----------------------------
+
+run()
+  Unable to fully structure code
+
+
+ba
+----------------------------
+
+a(java.util.Hashtable boolean )
+  Loose catch block
+
+
+bb
+----------------------------
+
+a(int )
+  Unable to fully structure code
+  Could not resolve type clashes
+
+
+com.hardwire.blob.Main
+----------------------------
+
+a(int int )
+  Handled duff style switch with additional control
+
+
+d
+----------------------------
+
+a()
+  Unable to fully structure code
+  Could not resolve type clashes
+
+
+j
+----------------------------
+
+run()
+  Loose catch block
+
+
+s
+----------------------------
+
+i()
+  Unable to fully structure code
