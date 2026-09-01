@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build the self-contained Index.html for Gish Reloaded — HTML5 reanimation.
+"""Build the self-contained index.html for Gish Reloaded — HTML5 reanimation.
 
 Embeds every original game data file (image packs, levels, fonts, sounds)
-as base64 into a single Index.html, so the game runs from a double-click
+as base64 into a single index.html, so the game runs from a double-click
 with no server. The engine consumes the ORIGINAL binary files at runtime —
 the same bytes the J2ME midlet shipped with.
 
@@ -58,7 +58,7 @@ def main():
     html = html.replace('/*__FAVICON__*/',
                         'data:image/png;base64,' + data['icons/icon_64x64.png'])
 
-    out = os.path.join(ROOT, 'Index.html')
+    out = os.path.join(ROOT, 'index.html')
     with open(out, 'w') as f:
         f.write(html)
     print('wrote %s (%.1f KB, %d data files)' % (out, len(html) / 1024.0, len(data)))

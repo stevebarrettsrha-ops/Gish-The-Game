@@ -7,7 +7,9 @@ went with it. This repository brings it back from the dead as a modern HTML5 gam
 
 ## Play
 
-Open **`Index.html`** in any browser. That's it — the whole game (engine + every
+**In your browser: <https://stevebarrettsrha-ops.github.io/Gish-The-Game/>**
+
+Or locally: open **`index.html`** in any browser. That's it — the whole game (engine + every
 original data file, base64-embedded) lives in that single file. No server, no
 install, no plugins.
 
@@ -29,7 +31,7 @@ install, no plugins.
 
 ## Build
 
-`Index.html` is generated:
+`index.html` is generated:
 
 ```
 python3 tools/build.py

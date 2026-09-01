@@ -60,10 +60,10 @@ function mkctx(imageStub) {
   return ctx;
 }
 
-// ---------- 1. built Index.html integrity ----------
-console.log('[1] Index.html embedded data integrity');
+// ---------- 1. built index.html integrity ----------
+console.log('[1] index.html embedded data integrity');
 {
-  const html = fs.readFileSync(path.join(ROOT, 'Index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   const m = html.match(/const GAME_DATA=(\{.*?\});/s);
   ok(!!m, 'GAME_DATA present');
   const data = JSON.parse(m[1]);
