@@ -75,8 +75,18 @@ verified true for all 88 files). Position is the tile centre (see conventions).
 `type` 1 and 5 become class `d` (a soft-body blob made of particles); every other
 value `t` becomes class `ae` with kind `t - 2`. `ae` sprites are global ids
 `256 + s` where `s` comes from the per-kind sprite group below
-(`ae.a[kind]` selects the group in `ae`'s static table `{{279,280,288,293},
-{218,219,230,234,227}, {238,-1,239,242,248}, {251,-1,256,252,304}, {297,306}, {300}}`).
+(`ae.a[kind]` selects the group in `ae`'s static table, laid out one row per kind):
+
+```
+ae.a = {
+    { 279, 280, 288, 293 },
+    { 218, 219, 230, 234, 227 },
+    { 238,  -1, 239, 242, 248 },
+    { 251,  -1, 256, 252, 304 },
+    { 297, 306 },
+    { 300 }
+}
+```
 
 | type | Class / kind | Meaning | Sprites (add 256) | Notes |
 |------|--------------|---------|-------------------|-------|

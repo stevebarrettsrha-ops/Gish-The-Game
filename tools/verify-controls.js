@@ -1,5 +1,5 @@
 // Controls verification — drives real key, mouse and DOM touch events against
-// the built Index.html on a desktop viewport and five device profiles.
+// the built index.html on a desktop viewport and five device profiles.
 //
 //   npm i playwright   (once)
 //   node tools/verify-controls.js
@@ -10,7 +10,7 @@
 // the soft buttons, and menu navigation by touch.
 const path = require('path');
 const { chromium } = require('playwright');
-const URL = 'file://' + path.join(__dirname, '..', 'Index.html');
+const URL = 'file://' + path.join(__dirname, '..', 'index.html');
 let pass = 0, fail = 0;
 const ok = (c, n, d) => { if (c) { pass++; console.log('  PASS', n); } else { fail++; console.log('  FAIL', n, d === undefined ? '' : JSON.stringify(d)); } };
 const keys = p => p.evaluate(() => {
