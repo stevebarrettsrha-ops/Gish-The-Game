@@ -54,6 +54,7 @@ const PINNED = 0x7fffffff;
 class Pt {
   constructor(x, y, mass) {
     this.x = x; this.y = y; this.px = x; this.py = y;
+    this.rx = x; this.ry = y;      // position at the start of the current tick (render interpolation)
     this.fx = 0; this.fy = 0;
     this.mass = mass || 1024;
     this.flags = 0;

@@ -54,7 +54,7 @@ function mkctx(imageStub) {
   vm.createContext(ctx);
   // assets.js is browser-only (GAME_DATA base64, WebAudio); the stub Assets above
   // stands in for it here, and its unpack logic is verified in section 2.
-  for (const f of ['font.js', 'level.js', 'physics.js', 'entities.js', 'bosses.js', 'game.js', 'shell.js']) {
+  for (const f of ['font.js', 'level.js', 'physics.js', 'entities.js', 'bosses.js', 'hints.js', 'game.js', 'shell.js']) {
     vm.runInContext(E(f), ctx, { filename: f });
   }
   return ctx;
@@ -477,6 +477,120 @@ console.log('[8] boss scripts (14 / 20 / 28 / 32 / 34)');
     ok(r.dead, 'level 34: Hera can be killed');
     ok(r.dlg === 129, 'level 34: her death triggers the ending dialog 129', 'got ' + r.dlg);
   }
+}
+
+// ---------- 9. idle hints ----------
+console.log('[9] idle hints: 35 s of silence -> demonstration sheet');
+{
+  const ctx = mkctx(true);
+  const res = vm.runInContext(`
+    (() => {
+      Font.init(); Font.loadStrings(); Shell.loadAll();
+      Game.start(2, 1, 0);
+      const G = Game.G, H = Hints.state;
+      const stub = ${ctxStub.toString()};
+      // advance ticks with no input; story dialogs are cleared directly so
+      // dismissing them does not count as the player doing something
+      const run = n => { for (let i = 0; i < n; i++) { if (G.state === 6) { G.dialog = null; G.state = 0; } Game.tick(); } };
+      const out = {};
+      run(499); out.before = H.visible;                  // 34.93 s: nothing
+      run(1); out.at35 = H.visible; out.page0 = H.page;  // 35.0 s: sheet up
+      const c = stub(); Game.draw(c, 0.5); out.drawCalls = c.calls.total; out.drawText = c.calls.drawImage;
+      run(Hints.PAGE_TICKS); out.page1 = H.page;         // moves on to the next demonstration
+      // every page draws for every input kind without throwing
+      out.drawErr = null;
+      for (const kind of ['key', 'mouse', 'touch']) for (let p = 0; p < Hints.PAGES.length; p++) {
+        H.kind = kind; H.page = p;
+        for (const a of [0, 0.37, 0.9]) { H.t = Math.floor(a * 40); try { Game.draw(stub(), a); } catch (e) { out.drawErr = kind + '/' + p + ': ' + e.message; } }
+      }
+      H.kind = null; H.page = 1; H.t = 0;                // put the tour back where it was
+      // captions fit three lines at the narrowest phone width
+      out.longest = 0;
+      for (const kind of Object.keys(Hints.TEXT)) for (const p of Hints.PAGES)
+        out.longest = Math.max(out.longest, Font.wrap(3, Font.encode(3, Hints.TEXT[kind][p]), 320 - 28).length);
+      // pin Gish where he sits so 42 s of "holding right" cannot roll him to
+      // his death (a restart would reset the tour and hide what we test)
+      for (const p of G.players[0].body.pts) p.mass = PINNED;
+      Game.key(-4, true);                                // press right: sheet down, timer reset
+      out.afterKey = H.visible; out.idleAfterKey = H.idleMs;
+      run(600); out.whileHeld = H.visible;               // key held = playing, never idle
+      Game.key(-4, false);
+      run(500); out.again = H.visible; out.pageAgain = H.page;   // 35 s after release: back, next page
+      Game.touchDown(300, 300); out.afterTouch = H.visible;      // a tap dismisses it too
+      // no idle counting behind a dialog or on the results sheet
+      G.state = 6; G.dialog = { id: 0, lines: [], portrait: 0, frames: 0, slide: 0 };
+      for (let i = 0; i < 600; i++) Game.tick();
+      out.inDialog = H.visible; out.idleInDialog = H.idleMs;
+      G.state = 0; G.dialog = null;
+      // the "hints" setting switches it off
+      Shell.S.settings.hints = false; run(600); out.disabled = H.visible; Shell.S.settings.hints = true;
+      // a new level starts the clock again
+      Game.start(3, 1, 0); out.afterStart = H.idleMs === 0 && !H.visible;
+      return out;
+    })()`, ctx);
+  ok(res.before === false && res.at35 === true, 'sheet appears exactly after 35 s without input', JSON.stringify([res.before, res.at35]));
+  ok(res.page0 === 0, 'a player who never moved is shown "move" first', res.page0);
+  ok(res.drawCalls > 0 && res.drawText > 0, 'sheet renders (panel, demo scene, caption)', res.drawCalls);
+  ok(res.page1 === 1, 'pages advance while the sheet stays up', res.page1);
+  ok(res.drawErr === null, 'every page draws for keyboard, mouse and touch', res.drawErr);
+  ok(res.longest <= 3, 'captions wrap to at most 3 lines at 320 px', res.longest);
+  ok(res.afterKey === false && res.idleAfterKey === 0, 'a key press dismisses it and restarts the timer');
+  ok(res.whileHeld === false, 'never shown while a direction is held');
+  ok(res.again === true && res.pageAgain === 2, 'returns after another 35 s, continuing the tour', JSON.stringify([res.again, res.pageAgain]));
+  ok(res.afterTouch === false, 'a tap dismisses it');
+  ok(res.inDialog === false && res.idleInDialog === 0, 'no idle counting behind a story dialog');
+  ok(res.disabled === false, 'respects hints = off in settings');
+  ok(res.afterStart === true, 'level start resets the idle clock');
+}
+
+// ---------- 10. render interpolation ----------
+console.log('[10] render interpolation between 70 ms ticks');
+{
+  const ctx = mkctx(true);
+  const res = vm.runInContext(`
+    (() => {
+      Font.init(); Font.loadStrings(); Shell.loadAll();
+      Game.start(2, 1, 0);
+      const G = Game.G, pl = G.players[0];
+      pl.keys.right = true;
+      Game.tick(); Game.tick();          // Gish is falling at the start of 1-2
+      let missing = 0, moved = 0;
+      for (const b of G.world.bodies) for (const p of b.pts) { if (p.rx === undefined) missing++; if (p.x !== p.rx || p.y !== p.ry) moved++; }
+      for (const p of G.world.particles) if (p.rx === undefined) missing++;
+      const stub = ${ctxStub.toString()};
+      const pos = [];
+      for (const a of [0, 0.5, 1]) { const c = stub(); Game.draw(c, a); pos.push({ y: G.drawPy + G.drawCamY, x: G.drawPx + G.drawCamX, calls: c.calls.total }); }
+      const c1 = pl.body.centroid();
+      let prevY = 0, n = 0;
+      for (const p of pl.body.pts) { prevY += p.ry; n++; }
+      prevY = prevY / n / 1024;
+      const legacy = stub(); Game.draw(legacy);   // no alpha given: current state, as before
+      return { missing, moved, pos, cur: c1.y / 1024, prevY, legacyOk: legacy.calls.total > 0, legacyY: G.drawPy + G.drawCamY };
+    })()`, ctx);
+  ok(res.missing === 0, 'every physics point carries a start-of-tick snapshot', res.missing);
+  ok(res.moved > 0, 'points moved during the tick (there is motion to smooth)', res.moved);
+  ok(res.pos[0].y < res.pos[1].y && res.pos[1].y < res.pos[2].y, 'alpha 0 -> 0.5 -> 1 sweeps Gish from the previous to the current tick position',
+    JSON.stringify(res.pos.map(p => +p.y.toFixed(2))));
+  ok(Math.abs(res.pos[0].y - res.prevY) < 0.01 && Math.abs(res.pos[2].y - res.cur) < 1, 'alpha 0 = last tick, alpha 1 = current tick',
+    JSON.stringify([res.pos[0].y, res.prevY, res.pos[2].y, res.cur]));
+  ok(res.legacyOk && Math.abs(res.legacyY - res.cur) < 1, 'draw() without alpha still renders the current state', res.legacyY);
+  // every level renders mid-tick: ropes (point, edge and fixed anchors),
+  // platforms, monsters with a second body, boxes, darkness, effects
+  const bad = [];
+  for (let id = 0; id < 88; id++) {
+    const c2 = mkctx(true);
+    try {
+      const sub = id >= 68 && id <= 77 ? 4 : id >= 78 ? 5 : id >= 41 && id <= 67 ? 2 : id >= 36 ? 1 : 0;
+      vm.runInContext(`
+        Font.init(); Font.loadStrings(); Shell.loadAll();
+        Game.start(${id}, ${sub >= 2 ? 2 : 1}, ${sub});
+        Game.G.players[0].keys.right = true;
+        for (let f = 0; f < 6; f++) { if (Game.G.state === 6) { Game.G.dialog = null; Game.G.state = 0; } Game.tick(); }
+        const stub = ${ctxStub.toString()};
+        for (const a of [0, 0.33, 1]) { const c = stub(); Game.draw(c, a); if (!c.calls.total) throw new Error('nothing drawn'); }`, c2);
+    } catch (e) { bad.push(id + ':' + e.message.slice(0, 50)); }
+  }
+  ok(bad.length === 0, 'all 88 levels draw at alpha 0 / 0.33 / 1 without exceptions', JSON.stringify(bad));
 }
 
 console.log('\\n=== ' + pass + ' passed, ' + fail + ' failed ===');

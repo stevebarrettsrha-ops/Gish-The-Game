@@ -9,7 +9,7 @@
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{width:100%;height:100%;overflow:hidden;background:#000;
     -webkit-user-select:none;user-select:none;touch-action:none}
-  #game{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  #game{position:absolute;left:0;top:0;
     image-rendering:pixelated;image-rendering:crisp-edges;background:#000}
 </style>
 </head>
@@ -611,6 +611,7 @@ const PINNED = 0x7fffffff;
 class Pt {
   constructor(x, y, mass) {
     this.x = x; this.y = y; this.px = x; this.py = y;
+    this.rx = x; this.ry = y;      // position at the start of the current tick (render interpolation)
     this.fx = 0; this.fy = 0;
     this.mass = mass || 1024;
     this.flags = 0;
@@ -2141,6 +2142,380 @@ const Bosses = (() => {
   return { aiFor, waypointAI, chaseAI, duelAI, tick, exitOverride, onBossDeath };
 })();
 
+// ==== engine/hints.js ====
+// Idle coaching — leave Gish alone for 35 s and a "hint!" sheet slides up in
+// which a little animated Gish demonstrates one control at a time (roll,
+// jump, heavy, sticky, slick, attack), worded for the input the player is
+// actually using (keyboard, mouse or touch) and shown with a matching key cap,
+// finger or cursor. Any press, tap or click dismisses it and restarts the
+// timer; a held direction key counts as playing, so it never interrupts
+// someone mid-roll. Honours the "hints" setting like the story hints do.
+
+const Hints = (() => {
+  const IDLE_MS = 35000;       // silence before the sheet appears
+  const TICK_MS = 70;          // one game tick
+  const PAGE_TICKS = 100;      // 7 s per demonstration before moving to the next
+  const LOOP = 40;             // one animation cycle (2.8 s)
+  const PAGES = ['move', 'jump', 'heavy', 'sticky', 'slick', 'attack'];
+
+  const TEXT = {
+    key: {
+      move: 'arrow keys or a and d roll gish left and right.',
+      jump: 'up, w or space jumps while gish stands on the ground.',
+      heavy: 'down or s makes gish heavy: he drops hard and smashes blocks.',
+      sticky: 'k or shift makes gish sticky (gray): he climbs walls and ceilings.',
+      slick: 'l or ctrl makes gish slick (brown): he slips through narrow gaps.',
+      attack: 'enter makes gish angry: he flings boxes away and squishes enemies.',
+    },
+    touch: {
+      move: 'hold a finger left or right of gish to roll him that way.',
+      jump: 'hold a finger above gish while he is on the ground to jump.',
+      heavy: 'hold a finger below gish: heavy gish drops hard and smashes blocks.',
+      sticky: 'tap the bottom-left button: gray sticky gish climbs walls and ceilings.',
+      slick: 'tap the bottom-left button: brown slick gish slips through narrow gaps.',
+      attack: "poke gish's body: angry gish flings boxes away and squishes enemies.",
+    },
+    mouse: {
+      move: 'hold the mouse button left or right of gish to roll him that way.',
+      jump: 'hold the mouse button above gish while he is on the ground to jump.',
+      heavy: 'hold the mouse below gish: heavy gish drops hard and smashes blocks.',
+      sticky: 'press k for sticky gish (gray): he climbs walls and ceilings.',
+      slick: 'press l for slick gish (brown): he slips through narrow gaps.',
+      attack: "click on gish's body: angry gish flings boxes away and squishes enemies.",
+    },
+  };
+
+  const H = {
+    idleMs: 0,        // ms without input while playing
+    visible: false,
+    page: 0,          // index into PAGES
+    t: 0,             // ticks the current page has been up
+    slide: 0,         // sheet slide-in progress (ticks, 0..4)
+    kind: null,       // 'key' | 'mouse' | 'touch' — last input the player used
+    moved: false,     // has the player driven Gish at all in this level?
+    shows: 0,         // sheets shown in this level
+  };
+
+  function inputKind() {
+    if (H.kind) return H.kind;
+    const nav = typeof navigator !== 'undefined' ? navigator : null;
+    return nav && (nav.maxTouchPoints > 0 || 'ontouchstart' in (typeof window !== 'undefined' ? window : {})) ? 'touch' : 'key';
+  }
+
+  function reset() {
+    H.idleMs = 0; H.visible = false; H.page = 0; H.t = 0; H.slide = 0; H.moved = false; H.shows = 0;
+  }
+
+  // the player did something (key, tap, click): sheet down, timer back to zero
+  function activity(kind) {
+    if (kind) H.kind = kind;
+    H.idleMs = 0;
+    if (H.visible) hide();
+  }
+
+  function show() {
+    H.visible = true; H.t = 0; H.slide = 0;
+    // first sheet: someone who has already rolled around does not need "move";
+    // later sheets continue the tour from where the last one stopped
+    if (H.shows === 0) H.page = H.moved ? 1 : 0;
+    else H.page = (H.page + 1) % PAGES.length;
+    H.shows++;
+  }
+  function hide() { H.visible = false; H.idleMs = 0; }
+
+  function tick(G) {
+    const pl = G.players[0];
+    const playing = G.state === 0 && pl && !pl.dead;
+    const k = pl && pl.keys;
+    if (k && (k.left || k.right || k.up || k.down)) {   // holding a direction = playing
+      H.moved = true;
+      H.idleMs = 0;
+      if (H.visible) hide();
+      return;
+    }
+    if (!playing) { if (H.visible) hide(); return; }    // dialogs, results, death
+    if (H.visible) {
+      if (H.slide < 4) H.slide++;
+      if (++H.t >= PAGE_TICKS) { H.t = 0; H.page = (H.page + 1) % PAGES.length; }
+      return;
+    }
+    H.idleMs += TICK_MS;
+    const enabled = !Shell.S.settings || Shell.S.settings.hints !== false;
+    if (H.idleMs >= IDLE_MS && enabled) show();
+  }
+
+  // ---------------- drawing ----------------
+  const ease = v => v * v * (3 - 2 * v);
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  const win = (u, a, b) => u >= a && u < b;           // is u inside [a, b)?
+  const TWO_PI = Math.PI * 2;
+  const rad2gaze = r => FX.norm(Math.round(r / TWO_PI * FX.PERIOD));
+
+  // a little Gish: wobbly ring, outline by ability, real face sprite (scaled)
+  function blob(ctx, x, y, r, sx, sy, gaze, ability, face, tt) {
+    const n = 16;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = i / n * TWO_PI;
+      const w = 1 + 0.05 * Math.sin(a * 3 + tt * 0.7) + 0.03 * Math.sin(a * 5 - tt * 0.9);
+      const px = x + Math.cos(a) * r * sx * w, py = y + Math.sin(a) * r * sy * w;
+      if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#000';
+    ctx.fill();
+    ctx.strokeStyle = ability === 2 ? '#bbbbbb' : ability === 1 ? '#a77c15' : '#000';
+    ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+    const off = FX.vecFromAngle(gaze, 2048);
+    ctx.save();
+    ctx.translate(Math.round(x + off.x / 1024 * sx), Math.round(y + off.y / 1024 * sy));
+    ctx.scale(0.75, 0.75);
+    Game.drawFace(ctx, 0, 0, gaze, 0, face);
+    ctx.restore();
+  }
+
+  // expanding ring that reads as "pressed here"
+  function ripple(ctx, x, y, tt) {
+    const ph = (tt * 0.6) % 1;
+    ctx.strokeStyle = 'rgba(255,255,255,' + (1 - ph).toFixed(2) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 7 + 10 * ph, 0, 7); ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // fingertip at (x, y), hand trailing down-right
+  function finger(ctx, x, y, pressed, tt) {
+    if (pressed) ripple(ctx, x, y, tt);
+    ctx.fillStyle = '#f2c9a0'; ctx.strokeStyle = '#3a2a1a';
+    ctx.beginPath();
+    ctx.moveTo(x - 5, y + 1); ctx.lineTo(x + 8, y + 24); ctx.lineTo(x + 20, y + 17); ctx.lineTo(x + 5, y - 3);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, 5.5, 0, 7); ctx.fill(); ctx.stroke();
+  }
+
+  // arrow cursor with its tip at (x, y)
+  function cursor(ctx, x, y, pressed, tt) {
+    if (pressed) ripple(ctx, x, y, tt);
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x, y + 16); ctx.lineTo(x + 4, y + 12.5); ctx.lineTo(x + 7, y + 19);
+    ctx.lineTo(x + 10, y + 17.5); ctx.lineTo(x + 7, y + 11.5); ctx.lineTo(x + 12, y + 11.5);
+    ctx.closePath();
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke();
+  }
+
+  function pointer(ctx, kind, x, y, pressed, tt) {
+    if (kind === 'mouse') cursor(ctx, x, y, pressed, tt); else finger(ctx, x, y, pressed, tt);
+  }
+
+  // key cap centred at (x, y); glyph is an arrow name or a short label
+  function keycap(ctx, x, y, glyph, pressed, w) {
+    w = w || 24;
+    const d = pressed ? 2 : 0;
+    ctx.fillStyle = '#111'; ctx.fillRect(x - (w >> 1), y - 10, w, 24);
+    ctx.fillStyle = pressed ? '#6a5a10' : '#3a3a3a'; ctx.fillRect(x - (w >> 1), y - 12 + d, w, 24);
+    ctx.strokeStyle = pressed ? '#ffe680' : '#bbb'; ctx.strokeRect(x - (w >> 1) + 0.5, y - 11.5 + d, w - 1, 23);
+    const cy = y + d;
+    ctx.fillStyle = pressed ? '#ffe680' : '#eee';
+    if (glyph === 'up' || glyph === 'down' || glyph === 'left' || glyph === 'right') {
+      const dx = glyph === 'left' ? -1 : glyph === 'right' ? 1 : 0;
+      const dy = glyph === 'up' ? -1 : glyph === 'down' ? 1 : 0;
+      ctx.beginPath();
+      ctx.moveTo(x + dx * 6, cy + dy * 6);
+      ctx.lineTo(x - dx * 4 + dy * 6, cy - dy * 4 + dx * 6);
+      ctx.lineTo(x - dx * 4 - dy * 6, cy - dy * 4 - dx * 6);
+      ctx.closePath(); ctx.fill();
+    } else {
+      ctx.save(); ctx.translate(x, cy); ctx.scale(0.6, 0.6);
+      Font.drawText(ctx, 3, glyph, 0, -11, 1);
+      ctx.restore();
+    }
+  }
+
+  // the on-screen surface button (bottom-left in the HUD), scaled to fit
+  function abilityButton(ctx, x, y, ability, tapped, tt) {
+    const im = Assets.images[4 + ability];
+    const size = 26;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x, y, size + 6, size + 6);
+    if (im) {
+      const s = Math.min(size / im.width, size / im.height);
+      ctx.drawImage(im, x + 3, y + 3, Math.round(im.width * s), Math.round(im.height * s));
+    }
+    ctx.strokeStyle = tapped ? '#ffe680' : '#999'; ctx.strokeRect(x + 0.5, y + 0.5, size + 5, size + 5);
+    if (tapped) ripple(ctx, x + 3 + (size >> 1), y + 3 + (size >> 1), tt);
+  }
+
+  // ---- the six scenes; each draws into the box (ax, ay, aw, ah) ----
+  function scene(ctx, page, kind, ax, ay, aw, ah, tt) {
+    const u = (tt % LOOP) / LOOP;                 // 0..1 through the loop
+    const floorY = ay + ah - 14, r = 17, gy = floorY - r;
+    const keys = kind === 'key';
+    const capX = ax + aw - 18, capY = ay + 16;   // key caps live top-right
+    ctx.fillStyle = '#4a3a2a'; ctx.fillRect(ax, floorY, aw, ah - (floorY - ay));
+    ctx.fillStyle = '#7a6a4a'; ctx.fillRect(ax, floorY, aw, 2);
+
+    switch (page) {
+      case 'move': {
+        const dir = u < 0.5 ? 1 : -1;
+        const e = ease((u % 0.5) / 0.5);
+        const x0 = ax + aw * 0.32, x1 = ax + aw * 0.68;
+        const x = dir > 0 ? x0 + (x1 - x0) * e : x1 - (x1 - x0) * e;
+        const gaze = rad2gaze((x - x0) / r);       // rolls as it goes
+        blob(ctx, x, gy, r, 1, 1, gaze, 0, 0, tt);
+        if (keys) {
+          keycap(ctx, capX - 28, capY, 'left', dir < 0);
+          keycap(ctx, capX, capY, 'right', dir > 0);
+        } else pointer(ctx, kind, x + dir * 46, gy - 2, true, tt);
+        break;
+      }
+      case 'jump': {
+        const x = ax + aw * 0.5;
+        let sy = 1, h = 0;
+        if (win(u, 0.2, 0.3)) sy = 1 - 0.3 * Math.sin(Math.PI * (u - 0.2) / 0.1);
+        else if (win(u, 0.3, 0.8)) { const p = (u - 0.3) / 0.5; h = 46 * Math.sin(Math.PI * p); sy = 1 + 0.12 * Math.sin(Math.PI * p); }
+        else if (win(u, 0.8, 0.9)) sy = 1 - 0.2 * Math.sin(Math.PI * (u - 0.8) / 0.1);
+        const sx = 1 / sy;
+        blob(ctx, x, floorY - r * sy - h, r, sx, sy, FX.norm(-FX.QUARTER), 0, 0, tt);
+        const pressed = win(u, 0.15, 0.5);
+        if (keys) keycap(ctx, capX, capY, 'up', pressed);
+        else pointer(ctx, kind, x, floorY - r - 44, pressed, tt);
+        break;
+      }
+      case 'heavy': {
+        const x = ax + aw * 0.5;
+        let y = gy, sx = 1, sy = 1;
+        if (win(u, 0.15, 0.35)) y = gy - 34 * Math.sin(Math.PI * (u - 0.15) / 0.4);       // hop up
+        else if (win(u, 0.35, 0.5)) { const p = (u - 0.35) / 0.15; y = (gy - 34) + (gy + 6 - (gy - 34)) * p * p; sy = 1.15; sx = 0.9; }   // slam down
+        else if (win(u, 0.5, 0.7)) { const p = Math.sin(Math.PI * (u - 0.5) / 0.2); sy = 1 - 0.45 * p; sx = 1 + 0.5 * p; y = floorY - r * sy; }
+        if (win(u, 0.5, 0.75)) {                     // debris bursting out of the impact
+          const p = (u - 0.5) / 0.25;
+          ctx.fillStyle = '#9c8a6a';
+          for (let i = 0; i < 6; i++) {
+            const side = i < 3 ? -1 : 1, spd = 26 + 10 * (i % 3);
+            const dx = side * (r + spd * p), dy = -(18 + 6 * (i % 3)) * p + 40 * p * p;
+            ctx.fillRect(Math.round(x + dx), Math.round(floorY - 2 + dy), 2, 2);
+          }
+        }
+        blob(ctx, x, y, r, sx, sy, FX.QUARTER, 0, 0, tt);
+        const pressed = win(u, 0.3, 0.7);
+        if (keys) keycap(ctx, capX, capY, 'down', pressed);
+        else pointer(ctx, kind, x, floorY + 6, pressed, tt);
+        break;
+      }
+      case 'sticky': {
+        const wallX = ax + aw * 0.72;
+        ctx.fillStyle = '#4a3a2a'; ctx.fillRect(wallX, ay, ax + aw - wallX, floorY - ay);
+        ctx.fillStyle = '#7a6a4a'; ctx.fillRect(wallX, ay, 2, floorY - ay);
+        const ability = u >= 0.12 ? 2 : 0;
+        const x0 = ax + aw * 0.3;
+        let x = x0, y = gy, sx = 1, gaze = 0;
+        if (win(u, 0.15, 0.4)) { const e = ease((u - 0.15) / 0.25); x = x0 + (wallX - r - x0) * e; gaze = rad2gaze((x - x0) / r); }
+        else if (u >= 0.4) {
+          x = wallX - r * 0.85; sx = 0.85;
+          const e = ease(clamp01((u - 0.4) / 0.5));
+          y = gy - (gy - (ay + r + 6)) * e;
+          gaze = rad2gaze((wallX - r - x0) / r + (gy - y) / r);
+        }
+        blob(ctx, x, y, r, sx, 1, gaze, ability, 0, tt);
+        const tap = win(u, 0.02, 0.15);
+        if (keys) {
+          keycap(ctx, capX - 28, capY, 'k', tap);
+          keycap(ctx, capX, capY, 'up', u >= 0.4 && u < 0.9);
+        } else {
+          abilityButton(ctx, ax + 4, floorY - 34, ability, tap, tt);
+          if (u >= 0.4 && u < 0.9) pointer(ctx, kind, x, y - r - 30, true, tt);
+          else if (win(u, 0.15, 0.4)) pointer(ctx, kind, x + 46, y - 2, true, tt);
+        }
+        break;
+      }
+      case 'slick': {
+        const gc = ax + aw * 0.55, gap = 12;
+        ctx.fillStyle = '#4a3a2a';
+        ctx.fillRect(gc - gap / 2 - 40, ay + 10, 40, floorY - ay - 10);
+        ctx.fillRect(gc + gap / 2, ay + 10, 40, floorY - ay - 10);
+        ctx.fillStyle = '#7a6a4a';
+        ctx.fillRect(gc - gap / 2 - 40, ay + 10, 40, 2); ctx.fillRect(gc + gap / 2, ay + 10, 40, 2);
+        const ability = u >= 0.1 ? 1 : 0;
+        const x0 = ax + aw * 0.22, x1 = ax + aw * 0.82;
+        const p = clamp01((u - 0.15) / 0.7);
+        const x = x0 + (x1 - x0) * p;
+        const squeeze = clamp01(1 - Math.abs(x - gc) / 30);
+        const sx = 1 - 0.62 * squeeze, sy = 1 / sx;
+        blob(ctx, x, floorY - r * sy, r, sx, sy, rad2gaze((x - x0) / r), ability, 0, tt);
+        const tap = win(u, 0.02, 0.12);
+        if (keys) {
+          keycap(ctx, capX - 28, capY, 'l', tap);
+          keycap(ctx, capX, capY, 'right', u >= 0.15 && u < 0.85);
+        } else {
+          abilityButton(ctx, ax + 4, floorY - 34, ability, tap, tt);
+          if (u >= 0.15 && u < 0.85) pointer(ctx, kind, x + 46, floorY - r - 2, true, tt);
+        }
+        break;
+      }
+      case 'attack': {
+        const x0 = ax + aw * 0.36;
+        const hit = u >= 0.3;
+        const recoil = hit ? 6 * Math.sin(Math.PI * clamp01((u - 0.3) / 0.2)) : 0;
+        // the box: at rest beside Gish, then flung away in an arc
+        let bx = x0 + r + 16, by = floorY - 12, rot = 0;
+        if (hit) { const p = (u - 0.3) / 0.7; bx += 110 * p; by -= 64 * 4 * p * (1 - p); rot = p * 3; }
+        ctx.save(); ctx.translate(bx, by); ctx.rotate(rot);
+        ctx.fillStyle = '#735c55'; ctx.fillRect(-12, -12, 24, 24);
+        ctx.strokeStyle = '#000'; ctx.strokeRect(-11.5, -11.5, 23, 23);
+        ctx.restore();
+        blob(ctx, x0 - recoil, gy, r, 1, 1, 0, 0, hit && u < 0.75 ? 1 : 0, tt);
+        const pressed = win(u, 0.22, 0.34);
+        if (keys) keycap(ctx, capX - 8, capY, 'enter', pressed, 44);
+        else {
+          // the pointer approaches and lands on his body
+          const a = ease(clamp01(u / 0.22));
+          pointer(ctx, kind, x0 + 40 - 40 * a, gy - 30 + 30 * a, pressed, tt);
+        }
+        break;
+      }
+    }
+  }
+
+  function draw(ctx, G, alpha) {
+    if (!H.visible) return;
+    const W = View.w, VH = View.h;
+    const kind = inputKind();
+    const page = PAGES[H.page];
+    const lines = Font.wrap(3, Font.encode(3, TEXT[kind][page]), W - 28);
+    const demoH = 96, lh = 25;
+    const boxH = 34 + demoH + 8 + lines.length * lh + 6;
+    const s = Math.min(1, (H.slide + alpha) / 4);
+    const y = Math.round(VH - (boxH + 76) * s);     // slides up, settling above the on-screen buttons
+    const tt = H.t + alpha;
+
+    // sheet, rope border along its top like the story dialogs
+    ctx.fillStyle = 'rgb(23,23,23)'; ctx.fillRect(6, y, W - 12, boxH);
+    ctx.strokeStyle = '#fff'; ctx.strokeRect(6.5, y + 0.5, W - 13, boxH - 1);
+    const rope = Assets.images[90];
+    if (rope) {
+      ctx.save(); ctx.beginPath(); ctx.rect(6, y - rope.height, W - 12, rope.height * 2); ctx.clip();
+      for (let x = 6; x < W - 6; x += rope.width) ctx.drawImage(rope, x, y - (rope.height >> 1));
+      ctx.restore();
+    }
+    // title + page dots
+    Font.drawText(ctx, 3, Font.str(81) || 'hint!', 14, y + 7);
+    for (let i = 0; i < PAGES.length; i++) {
+      ctx.fillStyle = i === H.page ? '#fff' : '#555';
+      ctx.beginPath(); ctx.arc(W - 16 - (PAGES.length - 1 - i) * 10, y + 18, 3, 0, 7); ctx.fill();
+    }
+    // demonstration box
+    const ax = 12, ay = y + 34, aw = W - 24, ah = demoH;
+    ctx.fillStyle = '#3f78bf'; ctx.fillRect(ax, ay, aw, ah);
+    ctx.save(); ctx.beginPath(); ctx.rect(ax, ay, aw, ah); ctx.clip();
+    scene(ctx, page, kind, ax, ay, aw, ah, tt);
+    ctx.restore();
+    ctx.strokeStyle = '#000'; ctx.strokeRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1);
+    // caption
+    Font.drawWrapped(ctx, 3, lines, 14, ay + ah + 8);
+  }
+
+  return { reset, activity, tick, draw, state: H, PAGES, TEXT, IDLE_MS, PAGE_TICKS };
+})();
+
 // ==== engine/game.js ====
 // In-game session — port of classes k (session) + ab (tick/render/HUD).
 // Runs the original data: 3-layer tile maps, sprite bases {276,566,407},
@@ -2172,6 +2547,8 @@ const Game = (() => {
     state: 0,        // 0 play, 5/4 results, 6 dialog
     frame: 0, timeMs: 0, score: [0, 0], amber: [0, 0], amberTotal: 0,
     camX: 0, camY: 0,
+    pcamX: 0, pcamY: 0,          // camera at the start of the current tick
+    drawCamX: undefined, drawCamY: undefined, drawPx: undefined, drawPy: undefined,  // last rendered camera / Gish
     dialog: null,    // {id, lines, speaker, shownFrames, slide}
     scene: 0,
     triggersFired: new Set(),
@@ -2257,6 +2634,20 @@ const Game = (() => {
     const c = G.players[0].body.centroid();
     G.camX = (c.x >> 10) - (View.w >> 1); G.camY = (c.y >> 10) - (View.h >> 1);
     clampCam();
+    G.drawCamX = G.drawCamY = G.drawPx = G.drawPy = undefined;
+    snapshot();
+    Hints.reset();
+  }
+
+  // Remember where everything is at the start of a tick so the renderer can
+  // interpolate between ticks (see draw()). Pts carry rx/ry, platforms too.
+  function snapshot() {
+    const W = G.world;
+    for (const b of W.bodies) for (const p of b.pts) { p.rx = p.x; p.ry = p.y; }
+    for (const p of W.ropePts) { p.rx = p.x; p.ry = p.y; }
+    for (const p of W.particles) { p.rx = p.x; p.ry = p.y; }
+    for (const p of G.platforms) { p.rx = p.x; p.ry = p.y; }
+    G.pcamX = G.camX; G.pcamY = G.camY;
   }
 
   function restartLevel() { start(G.levelId, G.mode, G.submode); }
@@ -2400,6 +2791,8 @@ const Game = (() => {
   function tick() {
     if (!G.active) return;
     G.frame++;
+    snapshot();
+    Hints.tick(G);
     if (G.state === 6) { if (G.dialog) G.dialog.frames++; updateCam(); return; }
     if (G.state === 5 || G.state === 4) { G.resultsT++; return; }
     G.timeMs += 70;
@@ -2587,8 +2980,13 @@ const Game = (() => {
   }
 
   // ---- input ----
+  // Any press, tap or click counts as the player being present: it resets the
+  // idle-hint timer (Main also calls this for input the game never sees).
+  function activity(kind) { Hints.activity(kind); }
+
   function key(code, down) {
     const pl = G.players[0];
+    if (down) Hints.activity();
     if (G.state === 6) { if (down && (code === -5 || code === -6 || code === 53 || code === 32)) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); } return; }
     if (G.state === 5 || G.state === 4) { if (down && G.resultsT > 7) finishResults(); return; }
     if (!pl || pl.dead) return;
@@ -2639,6 +3037,7 @@ const Game = (() => {
   // sheet or an on-screen button took it, or 'steer' when it drives Gish —
   // the caller uses that to decide which finger owns steering.
   function touchDown(x, y) {
+    Hints.activity();
     if (G.state === 6) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); return 'consumed'; }
     if (G.state === 5 || G.state === 4) { if (G.resultsT > 7) finishResults(); return 'consumed'; }
     const b = buttonAt(x, y);
@@ -2652,8 +3051,13 @@ const Game = (() => {
   function steer(x, y) {
     const pl = G.players[0];
     if (!pl) return;
-    const c = pl.body.centroid();
-    const px = (c.x >> 10) - G.camX, py = (c.y >> 10) - G.camY;
+    Hints.activity();
+    // measure against where Gish was last drawn, which is what the finger sees
+    let px = G.drawPx, py = G.drawPy;
+    if (px === undefined || py === undefined) {
+      const c = pl.body.centroid();
+      px = (c.x >> 10) - G.camX; py = (c.y >> 10) - G.camY;
+    }
     const dx = x - px, dy = y - py;
     if (Math.abs(dx) < 20 && Math.abs(dy) < 20) {
       pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
@@ -2676,11 +3080,43 @@ const Game = (() => {
   }
 
   // ================= RENDER =================
-  function draw(ctx) {
+  // Physics advances in 70 ms ticks but the screen repaints at the display
+  // rate, so a frame drawn straight from the physics state would sit still
+  // for 3-4 frames and then jump. draw() takes alpha = how far the renderer
+  // is into the current tick (0..1) and shows every point interpolated
+  // between its start-of-tick position (rx/ry, see snapshot()) and its
+  // current one; the camera likewise. That turns the 14 Hz steps into
+  // continuous motion without touching the simulation.
+  let A = 1;                                   // alpha of the frame being drawn
+  const TELEPORT = 64 << 10;                   // a 64 px jump in one tick is a respawn, not motion
+  function ipt(p) {                            // interpolated position of a Pt, in px
+    if (p.rx === undefined) return { x: p.x / 1024, y: p.y / 1024 };
+    const dx = p.x - p.rx, dy = p.y - p.ry;
+    if (dx > TELEPORT || dx < -TELEPORT || dy > TELEPORT || dy < -TELEPORT) return { x: p.x / 1024, y: p.y / 1024 };
+    return { x: (p.rx + dx * A) / 1024, y: (p.ry + dy * A) / 1024 };
+  }
+  function ipos(q) {                           // spring anchor: Pt, edge {a,b,t} or fixed {x,y}
+    if (q instanceof Pt) return ipt(q);
+    if (q.a) {
+      const a = ipt(q.a), b = ipt(q.b);
+      return { x: a.x + (b.x - a.x) * q.t / 1024, y: a.y + (b.y - a.y) * q.t / 1024 };
+    }
+    return { x: q.x / 1024, y: q.y / 1024 };
+  }
+  function icentroid(b) {
+    let x = 0, y = 0, n = 0;
+    for (const p of b.pts) { if (p.flags & 0x10) continue; const q = ipt(p); x += q.x; y += q.y; n++; }
+    return n ? { x: x / n, y: y / n } : { x: 0, y: 0 };
+  }
+  const icam = (prev, cur) => (prev === undefined || Math.abs(cur - prev) > 200) ? cur : Math.round(prev + (cur - prev) * A);
+
+  function draw(ctx, alpha) {
     if (!G.world) return;
+    A = alpha === undefined || !isFinite(alpha) ? 1 : Math.max(0, Math.min(1, alpha));
     const I = Assets.images;
     const W = View.w, H = View.h;
-    const k = G.camX, l = G.camY;
+    const k = icam(G.pcamX, G.camX), l = icam(G.pcamY, G.camY);
+    G.drawCamX = k; G.drawCamY = l;
     const t = G.lvl.tiles;
     const theme = G.lvl.theme;
 
@@ -2757,7 +3193,8 @@ const Game = (() => {
     // 7. platforms
     for (const p of G.platforms) {
       const im = I[235];
-      const px = (p.x >> 10) - k, py = (p.y >> 10) - l;
+      const px = Math.round((p.rx === undefined ? p.x : p.rx + (p.x - p.rx) * A) / 1024) - k;
+      const py = Math.round((p.ry === undefined ? p.y : p.ry + (p.y - p.ry) * A) / 1024) - l;
       if (im) {
         for (let i = 0; i < p.K.tiles; i++)
           ctx.drawImage(im, px + (p.K.vert ? 0 : i * 32), py + (p.K.vert ? i * 32 : 0));
@@ -2783,7 +3220,8 @@ const Game = (() => {
     // particles
     for (const p of G.world.particles) {
       if (p.flags & 0x10 && p.kind !== 6) continue;
-      const px = (p.x >> 10) - k, py = (p.y >> 10) - l;
+      const q = ipt(p);
+      const px = q.x - k, py = q.y - l;
       ctx.fillStyle = p.kind === 0 ? '#4a0000' : p.kind === 6 ? '#000' : '#5a4632';
       const r = Math.max(2, p.r >> 10);
       ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.fill();
@@ -2800,10 +3238,10 @@ const Game = (() => {
     // 11. ropes
     ctx.strokeStyle = '#6b4a2a'; ctx.lineWidth = 3;
     for (const s of G.world.ropes) {
-      const q = s.otherPos();
+      const a = ipt(s.p1), q = ipos(s.p2);
       ctx.beginPath();
-      ctx.moveTo((s.p1.x >> 10) - k, (s.p1.y >> 10) - l);
-      ctx.lineTo((q.x >> 10) - k, (q.y >> 10) - l);
+      ctx.moveTo(a.x - k, a.y - l);
+      ctx.lineTo(q.x - k, q.y - l);
       ctx.stroke();
     }
     ctx.lineWidth = 1;
@@ -2833,7 +3271,7 @@ const Game = (() => {
     // dialog / results / HUD
     if (G.state === 6 && G.dialog) drawDialog(ctx);
     else if (G.state === 5 || G.state === 4) drawResults(ctx);
-    else drawHUD(ctx);
+    else { drawHUD(ctx); Hints.draw(ctx, G, A); }
 
     if (G.banner) {
       ctx.fillStyle = 'rgba(0,0,0,0.85)';
@@ -2857,16 +3295,20 @@ const Game = (() => {
     }
   }
 
+  function tracePoly(ctx, b, k, l) {
+    ctx.beginPath();
+    for (let i = 0; i < b.pts.length; i++) {
+      const q = ipt(b.pts[i]);
+      if (i) ctx.lineTo(q.x - k, q.y - l);
+      else ctx.moveTo(q.x - k, q.y - l);
+    }
+    ctx.closePath();
+  }
+
   function drawBox(ctx, bx, k, l) {
     if (bx.dead) return;
     const b = bx.body;
-    ctx.beginPath();
-    for (let i = 0; i < b.pts.length; i++) {
-      const p = b.pts[i];
-      if (i) ctx.lineTo((p.x >> 10) - k, (p.y >> 10) - l);
-      else ctx.moveTo((p.x >> 10) - k, (p.y >> 10) - l);
-    }
-    ctx.closePath();
+    tracePoly(ctx, b, k, l);
     const dark = G.lvl.theme === 0;
     if (bx.K.ball) ctx.fillStyle = '#1a1a1a';
     else if (bx.kind === 4 || bx.kind === 0 || bx.kind === 7) ctx.fillStyle = dark ? '#24424a' : '#2a2624';
@@ -2875,27 +3317,21 @@ const Game = (() => {
     ctx.fill();
     ctx.strokeStyle = '#000'; ctx.stroke();
     if (bx.K.hang) {
-      const c = b.centroid();
+      const c = icentroid(b);
       ctx.fillStyle = '#111';
-      ctx.beginPath(); ctx.arc((c.x >> 10) - k, (c.y >> 10) - l, 3, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(c.x - k, c.y - l, 3, 0, 7); ctx.fill();
     }
     if (bx.K.ball) {
-      const c = b.centroid();
+      const c = icentroid(b);
       const face = Assets.images[FX.rnd(0, 60) === 0 ? 141 : 140];
-      if (face) ctx.drawImage(face, (c.x >> 10) - k - (face.width >> 1), (c.y >> 10) - l - (face.height >> 1));
+      if (face) ctx.drawImage(face, Math.round(c.x - k) - (face.width >> 1), Math.round(c.y - l) - (face.height >> 1));
     }
   }
 
   function drawPlayer(ctx, pl, k, l) {
     if (pl.dead) return;
     const b = pl.body;
-    ctx.beginPath();
-    for (let i = 0; i < b.pts.length; i++) {
-      const p = b.pts[i];
-      if (i) ctx.lineTo((p.x >> 10) - k, (p.y >> 10) - l);
-      else ctx.moveTo((p.x >> 10) - k, (p.y >> 10) - l);
-    }
-    ctx.closePath();
+    tracePoly(ctx, b, k, l);
     let fill = pl.skin === 2 ? '#999999' : pl.skin === 1 ? '#121516' : '#000000';
     if (pl.hurtFlash > 0) fill = ['#5a0000', '#b10000', '#ff0000'][pl.hurtFlash % 3];
     ctx.fillStyle = fill;
@@ -2908,17 +3344,23 @@ const Game = (() => {
     else outline = '#000000';
     ctx.strokeStyle = outline; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
     // face
-    const c = b.centroid();
+    const c = icentroid(b);
+    if (pl === G.players[0]) { G.drawPx = c.x - k; G.drawPy = c.y - l; }
     const off = FX.vecFromAngle(pl.gaze, 3072);
-    const fx = ((c.x + off.x) >> 10) - k, fy = ((c.y + off.y) >> 10) - l;
-    const base = pl.skin === 2 ? 516 : 110;
+    const fx = Math.round(c.x + off.x / 1024) - k, fy = Math.round(c.y + off.y / 1024) - l;
+    drawFace(ctx, fx, fy, pl.gaze, pl.skin, pl.hurtFlash > 0 ? 1 : pl.blink > 0 ? 2 : 0);
+  }
+
+  // Gish's face at (fx, fy): 8 base sprites picked by gaze angle, frames 8-31
+  // are 90/180/270 degree turns of them. mode 1 = hurt, 2 = blink.
+  function drawFace(ctx, fx, fy, gaze, skin, mode) {
+    const I = Assets.images;
     let im;
-    if (pl.hurtFlash > 0) im = Assets.images[pl.skin === 2 ? 525 : 125];
-    else if (pl.blink > 0) im = Assets.images[pl.skin === 2 ? 524 : 119];
+    if (mode === 1) im = I[skin === 2 ? 525 : 125];
+    else if (mode === 2) im = I[skin === 2 ? 524 : 119];
     else {
-      const fr = FX.frame32(pl.gaze - FX.QUARTER);
-      const bi = base + (fr & 7);
-      im = Assets.images[bi];
+      const fr = FX.frame32(gaze - FX.QUARTER);
+      im = I[(skin === 2 ? 516 : 110) + (fr & 7)];
       if (im && fr >= 8) {
         const rot = fr < 16 ? 90 : fr < 24 ? 180 : 270;
         ctx.save();
@@ -2926,7 +3368,7 @@ const Game = (() => {
         ctx.rotate(rot * Math.PI / 180);
         ctx.drawImage(im, -(im.width >> 1), -(im.height >> 1));
         ctx.restore();
-        im = null;
+        return;
       }
     }
     if (im) ctx.drawImage(im, fx - (im.width >> 1), fy - (im.height >> 1));
@@ -2941,7 +3383,8 @@ const Game = (() => {
     let im = I[256 + sprId];
     if (!im) im = I[256 + grp[0]];
     if (!im) return;
-    const px = (m.p.x >> 10) - k, py = (m.p.y >> 10) - l;
+    const q = ipt(m.p);
+    const px = Math.round(q.x) - k, py = Math.round(q.y) - l;
     if (m.kind === 6) {
       const segs = Math.max(1, (m.extend >> 15) + 1);
       for (let i = 0; i < segs; i++)
@@ -2954,14 +3397,15 @@ const Game = (() => {
     ctx.restore();
     if (m.p2) {
       const im2 = (grp[1] >= 0 ? I[256 + grp[1]] : null) || im;
-      ctx.drawImage(im2, (m.p2.x >> 10) - k - (im2.width >> 1), (m.p2.y >> 10) - l - (im2.height >> 1));
+      const q2 = ipt(m.p2);
+      ctx.drawImage(im2, Math.round(q2.x) - k - (im2.width >> 1), Math.round(q2.y) - l - (im2.height >> 1));
     }
   }
 
   function drawDarkness(ctx, k, l) {
     const pl = G.players[0];
-    const c = pl.body.centroid();
-    const px = (c.x >> 10) - k, py = (c.y >> 10) - l;
+    const c = icentroid(pl.body);
+    const px = Math.round(c.x) - k, py = Math.round(c.y) - l;
     const r = G.darkR >> 10;              // grows near lava glow (level 20)
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, View.w, py - r);
@@ -3081,7 +3525,7 @@ const Game = (() => {
   }
 
   return { start, restartLevel, abort, tick, draw, key, tap, addScore, respawnBox, effect,
-           touchDown, steer, releaseKeys, buttonAt, pressButton,
+           touchDown, steer, releaseKeys, buttonAt, pressButton, activity, drawFace,
            get active() { return G.active; }, set active(v) { G.active = v; },
            get mode() { return G.mode; }, get submode() { return G.submode; },
            get levelId() { return G.levelId; },
@@ -3709,6 +4153,9 @@ const Main = (() => {
     c.width = View.w; c.height = View.h;
     c.style.width = View.w * s + 'px';
     c.style.height = View.h * s + 'px';
+    // whole-pixel placement: a fractional offset would resample the pixel art
+    c.style.left = ((ww - View.w * s) >> 1) + 'px';
+    c.style.top = ((wh - View.h * s) >> 1) + 'px';
     View.ctx.imageSmoothingEnabled = false;
   }
 
@@ -3782,12 +4229,13 @@ const Main = (() => {
       return;
     }
 
-    // shell / game at fixed 70 ms ticks
+    // shell / game at fixed 70 ms ticks; the renderer runs at the display rate
+    // and draws the world interpolated between the last two ticks (acc / 70)
     while (acc >= 70) {
       acc -= 70;
       if (Game.active) Game.tick();
     }
-    if (Game.active) Game.draw(ctx);
+    if (Game.active) Game.draw(ctx, acc / 70);
     else Shell.draw(ctx);
   }
 
@@ -3808,6 +4256,7 @@ const Main = (() => {
     window.addEventListener('keydown', e => {
       if (e.repeat) { e.preventDefault(); return; }
       Assets.resumeAudio();
+      Game.activity('key');
       if (state === 'splash') { advanceSplashIfReady(); e.preventDefault(); return; }
       // text-entry screens take raw characters
       if (!Game.active && Shell.S.widget === 2) {
@@ -3849,6 +4298,7 @@ const Main = (() => {
     let mouseDown = false;
     canvas.addEventListener('mousedown', e => {
       e.preventDefault(); wake();
+      Game.activity('mouse');
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
       mouseDown = true;
@@ -3873,6 +4323,7 @@ const Main = (() => {
     let steerId = null;
     canvas.addEventListener('touchstart', e => {
       e.preventDefault(); wake();
+      Game.activity('touch');
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
       for (const t of e.changedTouches) {

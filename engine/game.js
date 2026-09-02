@@ -28,6 +28,8 @@ const Game = (() => {
     state: 0,        // 0 play, 5/4 results, 6 dialog
     frame: 0, timeMs: 0, score: [0, 0], amber: [0, 0], amberTotal: 0,
     camX: 0, camY: 0,
+    pcamX: 0, pcamY: 0,          // camera at the start of the current tick
+    drawCamX: undefined, drawCamY: undefined, drawPx: undefined, drawPy: undefined,  // last rendered camera / Gish
     dialog: null,    // {id, lines, speaker, shownFrames, slide}
     scene: 0,
     triggersFired: new Set(),
@@ -113,6 +115,20 @@ const Game = (() => {
     const c = G.players[0].body.centroid();
     G.camX = (c.x >> 10) - (View.w >> 1); G.camY = (c.y >> 10) - (View.h >> 1);
     clampCam();
+    G.drawCamX = G.drawCamY = G.drawPx = G.drawPy = undefined;
+    snapshot();
+    Hints.reset();
+  }
+
+  // Remember where everything is at the start of a tick so the renderer can
+  // interpolate between ticks (see draw()). Pts carry rx/ry, platforms too.
+  function snapshot() {
+    const W = G.world;
+    for (const b of W.bodies) for (const p of b.pts) { p.rx = p.x; p.ry = p.y; }
+    for (const p of W.ropePts) { p.rx = p.x; p.ry = p.y; }
+    for (const p of W.particles) { p.rx = p.x; p.ry = p.y; }
+    for (const p of G.platforms) { p.rx = p.x; p.ry = p.y; }
+    G.pcamX = G.camX; G.pcamY = G.camY;
   }
 
   function restartLevel() { start(G.levelId, G.mode, G.submode); }
@@ -256,6 +272,8 @@ const Game = (() => {
   function tick() {
     if (!G.active) return;
     G.frame++;
+    snapshot();
+    Hints.tick(G);
     if (G.state === 6) { if (G.dialog) G.dialog.frames++; updateCam(); return; }
     if (G.state === 5 || G.state === 4) { G.resultsT++; return; }
     G.timeMs += 70;
@@ -443,8 +461,13 @@ const Game = (() => {
   }
 
   // ---- input ----
+  // Any press, tap or click counts as the player being present: it resets the
+  // idle-hint timer (Main also calls this for input the game never sees).
+  function activity(kind) { Hints.activity(kind); }
+
   function key(code, down) {
     const pl = G.players[0];
+    if (down) Hints.activity();
     if (G.state === 6) { if (down && (code === -5 || code === -6 || code === 53 || code === 32)) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); } return; }
     if (G.state === 5 || G.state === 4) { if (down && G.resultsT > 7) finishResults(); return; }
     if (!pl || pl.dead) return;
@@ -495,6 +518,7 @@ const Game = (() => {
   // sheet or an on-screen button took it, or 'steer' when it drives Gish —
   // the caller uses that to decide which finger owns steering.
   function touchDown(x, y) {
+    Hints.activity();
     if (G.state === 6) { if (G.dialog && G.dialog.frames >= 8) dismissDialog(); return 'consumed'; }
     if (G.state === 5 || G.state === 4) { if (G.resultsT > 7) finishResults(); return 'consumed'; }
     const b = buttonAt(x, y);
@@ -508,8 +532,13 @@ const Game = (() => {
   function steer(x, y) {
     const pl = G.players[0];
     if (!pl) return;
-    const c = pl.body.centroid();
-    const px = (c.x >> 10) - G.camX, py = (c.y >> 10) - G.camY;
+    Hints.activity();
+    // measure against where Gish was last drawn, which is what the finger sees
+    let px = G.drawPx, py = G.drawPy;
+    if (px === undefined || py === undefined) {
+      const c = pl.body.centroid();
+      px = (c.x >> 10) - G.camX; py = (c.y >> 10) - G.camY;
+    }
     const dx = x - px, dy = y - py;
     if (Math.abs(dx) < 20 && Math.abs(dy) < 20) {
       pl.keys.left = pl.keys.right = pl.keys.up = pl.keys.down = false;
@@ -532,11 +561,43 @@ const Game = (() => {
   }
 
   // ================= RENDER =================
-  function draw(ctx) {
+  // Physics advances in 70 ms ticks but the screen repaints at the display
+  // rate, so a frame drawn straight from the physics state would sit still
+  // for 3-4 frames and then jump. draw() takes alpha = how far the renderer
+  // is into the current tick (0..1) and shows every point interpolated
+  // between its start-of-tick position (rx/ry, see snapshot()) and its
+  // current one; the camera likewise. That turns the 14 Hz steps into
+  // continuous motion without touching the simulation.
+  let A = 1;                                   // alpha of the frame being drawn
+  const TELEPORT = 64 << 10;                   // a 64 px jump in one tick is a respawn, not motion
+  function ipt(p) {                            // interpolated position of a Pt, in px
+    if (p.rx === undefined) return { x: p.x / 1024, y: p.y / 1024 };
+    const dx = p.x - p.rx, dy = p.y - p.ry;
+    if (dx > TELEPORT || dx < -TELEPORT || dy > TELEPORT || dy < -TELEPORT) return { x: p.x / 1024, y: p.y / 1024 };
+    return { x: (p.rx + dx * A) / 1024, y: (p.ry + dy * A) / 1024 };
+  }
+  function ipos(q) {                           // spring anchor: Pt, edge {a,b,t} or fixed {x,y}
+    if (q instanceof Pt) return ipt(q);
+    if (q.a) {
+      const a = ipt(q.a), b = ipt(q.b);
+      return { x: a.x + (b.x - a.x) * q.t / 1024, y: a.y + (b.y - a.y) * q.t / 1024 };
+    }
+    return { x: q.x / 1024, y: q.y / 1024 };
+  }
+  function icentroid(b) {
+    let x = 0, y = 0, n = 0;
+    for (const p of b.pts) { if (p.flags & 0x10) continue; const q = ipt(p); x += q.x; y += q.y; n++; }
+    return n ? { x: x / n, y: y / n } : { x: 0, y: 0 };
+  }
+  const icam = (prev, cur) => (prev === undefined || Math.abs(cur - prev) > 200) ? cur : Math.round(prev + (cur - prev) * A);
+
+  function draw(ctx, alpha) {
     if (!G.world) return;
+    A = alpha === undefined || !isFinite(alpha) ? 1 : Math.max(0, Math.min(1, alpha));
     const I = Assets.images;
     const W = View.w, H = View.h;
-    const k = G.camX, l = G.camY;
+    const k = icam(G.pcamX, G.camX), l = icam(G.pcamY, G.camY);
+    G.drawCamX = k; G.drawCamY = l;
     const t = G.lvl.tiles;
     const theme = G.lvl.theme;
 
@@ -613,7 +674,8 @@ const Game = (() => {
     // 7. platforms
     for (const p of G.platforms) {
       const im = I[235];
-      const px = (p.x >> 10) - k, py = (p.y >> 10) - l;
+      const px = Math.round((p.rx === undefined ? p.x : p.rx + (p.x - p.rx) * A) / 1024) - k;
+      const py = Math.round((p.ry === undefined ? p.y : p.ry + (p.y - p.ry) * A) / 1024) - l;
       if (im) {
         for (let i = 0; i < p.K.tiles; i++)
           ctx.drawImage(im, px + (p.K.vert ? 0 : i * 32), py + (p.K.vert ? i * 32 : 0));
@@ -639,7 +701,8 @@ const Game = (() => {
     // particles
     for (const p of G.world.particles) {
       if (p.flags & 0x10 && p.kind !== 6) continue;
-      const px = (p.x >> 10) - k, py = (p.y >> 10) - l;
+      const q = ipt(p);
+      const px = q.x - k, py = q.y - l;
       ctx.fillStyle = p.kind === 0 ? '#4a0000' : p.kind === 6 ? '#000' : '#5a4632';
       const r = Math.max(2, p.r >> 10);
       ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.fill();
@@ -656,10 +719,10 @@ const Game = (() => {
     // 11. ropes
     ctx.strokeStyle = '#6b4a2a'; ctx.lineWidth = 3;
     for (const s of G.world.ropes) {
-      const q = s.otherPos();
+      const a = ipt(s.p1), q = ipos(s.p2);
       ctx.beginPath();
-      ctx.moveTo((s.p1.x >> 10) - k, (s.p1.y >> 10) - l);
-      ctx.lineTo((q.x >> 10) - k, (q.y >> 10) - l);
+      ctx.moveTo(a.x - k, a.y - l);
+      ctx.lineTo(q.x - k, q.y - l);
       ctx.stroke();
     }
     ctx.lineWidth = 1;
@@ -689,7 +752,7 @@ const Game = (() => {
     // dialog / results / HUD
     if (G.state === 6 && G.dialog) drawDialog(ctx);
     else if (G.state === 5 || G.state === 4) drawResults(ctx);
-    else drawHUD(ctx);
+    else { drawHUD(ctx); Hints.draw(ctx, G, A); }
 
     if (G.banner) {
       ctx.fillStyle = 'rgba(0,0,0,0.85)';
@@ -713,16 +776,20 @@ const Game = (() => {
     }
   }
 
+  function tracePoly(ctx, b, k, l) {
+    ctx.beginPath();
+    for (let i = 0; i < b.pts.length; i++) {
+      const q = ipt(b.pts[i]);
+      if (i) ctx.lineTo(q.x - k, q.y - l);
+      else ctx.moveTo(q.x - k, q.y - l);
+    }
+    ctx.closePath();
+  }
+
   function drawBox(ctx, bx, k, l) {
     if (bx.dead) return;
     const b = bx.body;
-    ctx.beginPath();
-    for (let i = 0; i < b.pts.length; i++) {
-      const p = b.pts[i];
-      if (i) ctx.lineTo((p.x >> 10) - k, (p.y >> 10) - l);
-      else ctx.moveTo((p.x >> 10) - k, (p.y >> 10) - l);
-    }
-    ctx.closePath();
+    tracePoly(ctx, b, k, l);
     const dark = G.lvl.theme === 0;
     if (bx.K.ball) ctx.fillStyle = '#1a1a1a';
     else if (bx.kind === 4 || bx.kind === 0 || bx.kind === 7) ctx.fillStyle = dark ? '#24424a' : '#2a2624';
@@ -731,27 +798,21 @@ const Game = (() => {
     ctx.fill();
     ctx.strokeStyle = '#000'; ctx.stroke();
     if (bx.K.hang) {
-      const c = b.centroid();
+      const c = icentroid(b);
       ctx.fillStyle = '#111';
-      ctx.beginPath(); ctx.arc((c.x >> 10) - k, (c.y >> 10) - l, 3, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(c.x - k, c.y - l, 3, 0, 7); ctx.fill();
     }
     if (bx.K.ball) {
-      const c = b.centroid();
+      const c = icentroid(b);
       const face = Assets.images[FX.rnd(0, 60) === 0 ? 141 : 140];
-      if (face) ctx.drawImage(face, (c.x >> 10) - k - (face.width >> 1), (c.y >> 10) - l - (face.height >> 1));
+      if (face) ctx.drawImage(face, Math.round(c.x - k) - (face.width >> 1), Math.round(c.y - l) - (face.height >> 1));
     }
   }
 
   function drawPlayer(ctx, pl, k, l) {
     if (pl.dead) return;
     const b = pl.body;
-    ctx.beginPath();
-    for (let i = 0; i < b.pts.length; i++) {
-      const p = b.pts[i];
-      if (i) ctx.lineTo((p.x >> 10) - k, (p.y >> 10) - l);
-      else ctx.moveTo((p.x >> 10) - k, (p.y >> 10) - l);
-    }
-    ctx.closePath();
+    tracePoly(ctx, b, k, l);
     let fill = pl.skin === 2 ? '#999999' : pl.skin === 1 ? '#121516' : '#000000';
     if (pl.hurtFlash > 0) fill = ['#5a0000', '#b10000', '#ff0000'][pl.hurtFlash % 3];
     ctx.fillStyle = fill;
@@ -764,17 +825,23 @@ const Game = (() => {
     else outline = '#000000';
     ctx.strokeStyle = outline; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
     // face
-    const c = b.centroid();
+    const c = icentroid(b);
+    if (pl === G.players[0]) { G.drawPx = c.x - k; G.drawPy = c.y - l; }
     const off = FX.vecFromAngle(pl.gaze, 3072);
-    const fx = ((c.x + off.x) >> 10) - k, fy = ((c.y + off.y) >> 10) - l;
-    const base = pl.skin === 2 ? 516 : 110;
+    const fx = Math.round(c.x + off.x / 1024) - k, fy = Math.round(c.y + off.y / 1024) - l;
+    drawFace(ctx, fx, fy, pl.gaze, pl.skin, pl.hurtFlash > 0 ? 1 : pl.blink > 0 ? 2 : 0);
+  }
+
+  // Gish's face at (fx, fy): 8 base sprites picked by gaze angle, frames 8-31
+  // are 90/180/270 degree turns of them. mode 1 = hurt, 2 = blink.
+  function drawFace(ctx, fx, fy, gaze, skin, mode) {
+    const I = Assets.images;
     let im;
-    if (pl.hurtFlash > 0) im = Assets.images[pl.skin === 2 ? 525 : 125];
-    else if (pl.blink > 0) im = Assets.images[pl.skin === 2 ? 524 : 119];
+    if (mode === 1) im = I[skin === 2 ? 525 : 125];
+    else if (mode === 2) im = I[skin === 2 ? 524 : 119];
     else {
-      const fr = FX.frame32(pl.gaze - FX.QUARTER);
-      const bi = base + (fr & 7);
-      im = Assets.images[bi];
+      const fr = FX.frame32(gaze - FX.QUARTER);
+      im = I[(skin === 2 ? 516 : 110) + (fr & 7)];
       if (im && fr >= 8) {
         const rot = fr < 16 ? 90 : fr < 24 ? 180 : 270;
         ctx.save();
@@ -782,7 +849,7 @@ const Game = (() => {
         ctx.rotate(rot * Math.PI / 180);
         ctx.drawImage(im, -(im.width >> 1), -(im.height >> 1));
         ctx.restore();
-        im = null;
+        return;
       }
     }
     if (im) ctx.drawImage(im, fx - (im.width >> 1), fy - (im.height >> 1));
@@ -797,7 +864,8 @@ const Game = (() => {
     let im = I[256 + sprId];
     if (!im) im = I[256 + grp[0]];
     if (!im) return;
-    const px = (m.p.x >> 10) - k, py = (m.p.y >> 10) - l;
+    const q = ipt(m.p);
+    const px = Math.round(q.x) - k, py = Math.round(q.y) - l;
     if (m.kind === 6) {
       const segs = Math.max(1, (m.extend >> 15) + 1);
       for (let i = 0; i < segs; i++)
@@ -810,14 +878,15 @@ const Game = (() => {
     ctx.restore();
     if (m.p2) {
       const im2 = (grp[1] >= 0 ? I[256 + grp[1]] : null) || im;
-      ctx.drawImage(im2, (m.p2.x >> 10) - k - (im2.width >> 1), (m.p2.y >> 10) - l - (im2.height >> 1));
+      const q2 = ipt(m.p2);
+      ctx.drawImage(im2, Math.round(q2.x) - k - (im2.width >> 1), Math.round(q2.y) - l - (im2.height >> 1));
     }
   }
 
   function drawDarkness(ctx, k, l) {
     const pl = G.players[0];
-    const c = pl.body.centroid();
-    const px = (c.x >> 10) - k, py = (c.y >> 10) - l;
+    const c = icentroid(pl.body);
+    const px = Math.round(c.x) - k, py = Math.round(c.y) - l;
     const r = G.darkR >> 10;              // grows near lava glow (level 20)
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, View.w, py - r);
@@ -937,7 +1006,7 @@ const Game = (() => {
   }
 
   return { start, restartLevel, abort, tick, draw, key, tap, addScore, respawnBox, effect,
-           touchDown, steer, releaseKeys, buttonAt, pressButton,
+           touchDown, steer, releaseKeys, buttonAt, pressButton, activity, drawFace,
            get active() { return G.active; }, set active(v) { G.active = v; },
            get mode() { return G.mode; }, get submode() { return G.submode; },
            get levelId() { return G.levelId; },

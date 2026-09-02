@@ -37,6 +37,20 @@ install, no plugins.
 python3 tools/build.py
 ```
 
+## Engine notes
+
+- **Smooth motion.** The simulation keeps the original 70 ms tick (about 14 Hz,
+  two physics substeps) so the game feels exactly like the phone version, but
+  the renderer runs at the display's refresh rate and draws every body, rope,
+  platform and the camera interpolated between the last two ticks. Without this
+  Gish and the world advanced in 6-10 px jumps every fourth frame.
+- **Idle hints.** Leave Gish alone for 35 seconds and a "hint!" sheet slides up
+  in which a little animated Gish demonstrates one control at a time: roll,
+  jump, heavy, sticky, slick, attack. The wording and the illustration follow
+  the input you are using (key caps on a keyboard, a finger on touch, a cursor
+  with a mouse). Any key, tap or click dismisses it; holding a direction never
+  triggers it. It respects the `hints` toggle in settings, like the story hints.
+
 ## Controls
 
 ### Desktop
@@ -79,6 +93,10 @@ Verify all of this on your own machine with:
 ```
 node tools/verify-controls.js
 ```
+
+`node tools/verify-motion.js` checks in a real browser that motion is spread
+evenly over frames (no stutter) and that the idle-hint sheet appears and reacts
+to real input; `node tools/verify.js` runs the headless structural suite.
 
 ## Provenance
 

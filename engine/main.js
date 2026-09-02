@@ -18,6 +18,9 @@ const Main = (() => {
     c.width = View.w; c.height = View.h;
     c.style.width = View.w * s + 'px';
     c.style.height = View.h * s + 'px';
+    // whole-pixel placement: a fractional offset would resample the pixel art
+    c.style.left = ((ww - View.w * s) >> 1) + 'px';
+    c.style.top = ((wh - View.h * s) >> 1) + 'px';
     View.ctx.imageSmoothingEnabled = false;
   }
 
@@ -91,12 +94,13 @@ const Main = (() => {
       return;
     }
 
-    // shell / game at fixed 70 ms ticks
+    // shell / game at fixed 70 ms ticks; the renderer runs at the display rate
+    // and draws the world interpolated between the last two ticks (acc / 70)
     while (acc >= 70) {
       acc -= 70;
       if (Game.active) Game.tick();
     }
-    if (Game.active) Game.draw(ctx);
+    if (Game.active) Game.draw(ctx, acc / 70);
     else Shell.draw(ctx);
   }
 
@@ -117,6 +121,7 @@ const Main = (() => {
     window.addEventListener('keydown', e => {
       if (e.repeat) { e.preventDefault(); return; }
       Assets.resumeAudio();
+      Game.activity('key');
       if (state === 'splash') { advanceSplashIfReady(); e.preventDefault(); return; }
       // text-entry screens take raw characters
       if (!Game.active && Shell.S.widget === 2) {
@@ -158,6 +163,7 @@ const Main = (() => {
     let mouseDown = false;
     canvas.addEventListener('mousedown', e => {
       e.preventDefault(); wake();
+      Game.activity('mouse');
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
       mouseDown = true;
@@ -182,6 +188,7 @@ const Main = (() => {
     let steerId = null;
     canvas.addEventListener('touchstart', e => {
       e.preventDefault(); wake();
+      Game.activity('touch');
       if (state === 'splash') { advanceSplashIfReady(); return; }
       if (state === 'loading') return;
       for (const t of e.changedTouches) {
